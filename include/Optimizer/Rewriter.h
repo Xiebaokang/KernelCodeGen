@@ -45,6 +45,21 @@ struct Rewriter {
     return idxes;
   }
 
+  static std::vector<mlir::Value> getElementIdx(mlir::AffineParallelOp parallelLevel) {
+    std::vector<mlir::Value> idxes;
+    auto ivs = parallelLevel.getIVs();
+    for (auto iv : ivs) {
+      auto users = iv.getUsers();
+      for (auto user : users) {
+        if (auto mapOp = mlir::dyn_cast<mlir::AffineApplyOp>(user)) {
+          idxes.push_back(mapOp.getResult());
+          break;
+        }
+      }
+    }
+    return idxes;
+  }
+
   /// @brief 
   /// @param forOp 
   /// @param num_output 
@@ -226,6 +241,33 @@ struct Rewriter {
 
   static mlir::AffineForOp outer_product(mlir::OpBuilder& builder, mlir::Value tileC, 
     mlir::Value fragA, mlir::Value fragB, int64_t m, int64_t n);
+
+  /*----------------------------------------------------------------*/
+  
+  static std::vector<mlir::AffineForOp> combineToTowDim(std::vector<mlir::AffineForOp> loops);
+
+
+  static mlir::AffineForOp noVcetorRead(mlir::Value src, mlir::Value dst, mlir::AffineMap map, 
+                                  llvm::SmallVector<mlir::Value> operands, mlir::AffineForOp compute_at, Position pos);
+
+
+  static mlir::AffineForOp noVcetorWrite(mlir::Value src, mlir::Value dst, mlir::AffineMap map, 
+                                  llvm::SmallVector<mlir::Value> operands, mlir::AffineForOp compute_at, Position pos);
+
+  static mlir::AffineIfOp irregularMat(mlir::AffineForOp forOp, std::vector<int> range, llvm::SmallVector<mlir::Value> operands);
+
+  static mlir::AffineForOp combineToOneDim(std::vector<mlir::AffineForOp> loops);
+
+  static mlir::Value bufferizeLoopCarryVar(mlir::AffineForOp &loop, mlir::Block* buildBlock);
+
+  static mlir::AffineForOp read(mlir::Value src, mlir::Value dst, std::vector<mlir::AffineMap> maps, llvm::SmallVector<mlir::Value> operands, 
+                                std::vector<int64_t> widths, mlir::AffineForOp compute_at, Position pos);
+
+  static void swapLoops(std::vector<std::vector<mlir::AffineForOp>> loops);
+
+  static void changeMemoryToShared(mlir::Operation* resultOp, mlir::Value buffer);
+
+  static mlir::AffineParallelOp combineParallel(std::vector<mlir::AffineParallelOp> pals);
 };
 
 }

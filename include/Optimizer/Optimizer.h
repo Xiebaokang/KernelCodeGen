@@ -79,6 +79,100 @@ struct MatmulOptimizer : Optimizer {
   static std::map<std::string, int> matmulConfig;
 };
 
+struct BinaryOptimizer : Optimizer {
+  BinaryOptimizer() {
+    this->name = std::move(std::string("Binary"));
+  }
+  virtual bool applicable(mlir::ModuleOp& module) override;
+  virtual void applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& builder) override;
+
+  mlir::AffineMap getAffineMap(const std::string& mapIdentifier, mlir::OpBuilder& builder, const std::vector<int64_t> &extras={}, 
+                                const int needDims=0, const int oneDimNums=0);
+  llvm::SmallVector<mlir::Value> getMinLoadOperands(int dim, llvm::SmallVector<mlir::Value> operands, const mlir::Value cst=nullptr);
+
+  enum class BinaryType {
+    constant = 0,
+    allOne = 1,
+    allEqual = 2,   // (2, 20, 256), (2, 20, 256)
+    hasOneOrder = 3,  // (2, 20, 256), (1, 20, 256)   (2, 20, 256), (1, 256)
+    noOneOrder = 4,  // (2, 20, 256), (20, 256)
+    hasOneUnorder = 5    // (2, 20, 256), (20, 1)   (2, 20, 256), (1, 20, 1)
+  };
+
+  struct BinaryOpData {
+    BinaryType type;
+    int oneDimNums = 0;
+    int needDimNums = 0;
+  };
+
+  void getBinaryOpData(mlir::Value max_load, mlir::Value min_load, BinaryOpData &data);
+  
+  void clear() {
+    binaryBuffers.clear();
+    binarys.clear();
+    binaryLoops.clear();
+  }
+
+  struct MemoryBuffer {
+    mlir::Value A;
+    mlir::Value B;
+    mlir::Value C;
+  };
+
+  std::map<mlir::func::FuncOp, MemoryBuffer, CompareFunc> binaryBuffers;
+  std::set<mlir::func::FuncOp, CompareFunc> binarys;
+  std::map<mlir::func::FuncOp, std::vector<mlir::AffineForOp>, CompareFunc> binaryLoops;
+  static std::map<std::string, int> binaryConfig;
+};
+
+struct ElementWiseOptimizer : Optimizer {
+  ElementWiseOptimizer() {
+    this->name = std::move(std::string("ElementWise"));
+  }
+  virtual bool applicable(mlir::ModuleOp& module) override;
+  virtual void applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& builder) override;
+  mlir::AffineMap getAffineMap(const std::string& mapIdentifier, mlir::OpBuilder& builder, const std::vector<int64_t> &extras={});
+  void clear() {
+    elementWiseBuffers.clear();
+    elementWises.clear();
+    elementWiseLoops.clear();
+  }
+
+  struct MemoryBuffer {
+    mlir::Value input;
+    mlir::Value output;
+  };
+
+  std::map<mlir::func::FuncOp, MemoryBuffer, CompareFunc> elementWiseBuffers;
+  std::set<mlir::func::FuncOp, CompareFunc> elementWises;
+  std::map<mlir::func::FuncOp, std::vector<mlir::AffineForOp>, CompareFunc> elementWiseLoops;
+  static std::map<std::string, int> elementWiseConfig;
+};
+
+struct LayerNormOptimizer : Optimizer {
+  LayerNormOptimizer() {
+    this->name = std::move(std::string("LayerNorm"));
+  }
+  virtual bool applicable(mlir::ModuleOp& module) override;
+  virtual void applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& builder) override;
+  mlir::AffineMap getAffineMap(const std::string& mapIdentifier, mlir::OpBuilder& builder, const std::vector<int64_t> &extras={});
+  void clear() {
+    layerNormBuffers.clear();
+    layerNorms.clear();
+    layerNormLoops.clear();
+  }
+
+  struct MemoryBuffer {
+    mlir::Value input;
+    mlir::Value output;
+  };
+
+  std::map<mlir::func::FuncOp, MemoryBuffer, CompareFunc> layerNormBuffers;
+  std::set<mlir::func::FuncOp, CompareFunc> layerNorms;
+  std::map<mlir::func::FuncOp, std::vector<mlir::AffineForOp>, CompareFunc> layerNormLoops;
+  static std::map<std::string, int> layerNormConfig;
+};
+
 struct FMHAOptimizer : Optimizer {
 
   FMHAOptimizer() {

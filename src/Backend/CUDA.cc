@@ -109,6 +109,12 @@ private:
   void codegen(mlir::arith::MaxFOp);
   void codegen(mlir::arith::SubFOp);
   void codegen(mlir::arith::DivFOp);
+  void codegen(mlir::math::PowFOp);
+  void codegen(mlir::arith::CmpFOp);
+  void codegen(mlir::math::TanhOp);
+  void codegen(mlir::math::SqrtOp);
+  void codegen(mlir::math::LogOp);
+  void codegen(mlir::arith::BitcastOp);
   void codegen(mlir::math::ExpOp);
   void codegen(mlir::memref::AllocOp);
   void codegen(mlir::AffineApplyOp);
@@ -310,6 +316,36 @@ std::vector<mlir::Value> collectVars(mlir::AffineParallelOp node) {
     setValueName(result, "temp" + std::to_string(tempCounter++));
   });
 
+  node.walk<mlir::WalkOrder::PreOrder>([&](mlir::math::PowFOp powOp) {
+    auto result = powOp.getResult();
+    setValueName(result, "temp" + std::to_string(tempCounter++));
+  });
+
+  node.walk<mlir::WalkOrder::PreOrder>([&](mlir::arith::CmpFOp cmpOp) {
+    auto result = cmpOp.getResult();
+    setValueName(result, "temp" + std::to_string(tempCounter++));
+  });
+
+  node.walk<mlir::WalkOrder::PreOrder>([&](mlir::math::TanhOp tanhOp) {
+    auto result = tanhOp.getResult();
+    setValueName(result, "temp" + std::to_string(tempCounter++));
+  });
+
+  node.walk<mlir::WalkOrder::PreOrder>([&](mlir::math::SqrtOp sqrtOp) {
+    auto result = sqrtOp.getResult();
+    setValueName(result, "temp" + std::to_string(tempCounter++));
+  });
+
+  node.walk<mlir::WalkOrder::PreOrder>([&](mlir::math::LogOp logOp) {
+    auto result = logOp.getResult();
+    setValueName(result, "temp" + std::to_string(tempCounter++));
+  });
+
+  node.walk<mlir::WalkOrder::PreOrder>([&](mlir::arith::BitcastOp castOp) {
+    auto result = castOp.getResult();
+    setValueName(result, "temp" + std::to_string(tempCounter++));
+  });
+
   node.walk<mlir::WalkOrder::PreOrder>([&](mlir::gpu::ShuffleOp shflOp) {
     auto result = shflOp.getResult(0);
     setValueName(result, "temp" + std::to_string(tempCounter++));
@@ -449,6 +485,61 @@ void CUDAGenerator::codegen(mlir::arith::DivFOp divOp) {
   source << "auto " << getValueName(divOp.getResult()) << " = "
                << getValueName(divOp.getLhs()) << " / "
                << getValueName(divOp.getRhs()) << ";\n";
+}
+
+void CUDAGenerator::codegen(mlir::math::PowFOp powOp) {
+  indent();
+  source << "auto " << getValueName(powOp.getResult()) << " = powf("
+               << getValueName(powOp.getLhs()) << ", "
+               << getValueName(powOp.getRhs()) << ");\n";
+}
+
+void CUDAGenerator::codegen(mlir::math::TanhOp tanhOp) {
+  indent();
+  source << "auto " << getValueName(tanhOp.getResult()) << " = tanhf("
+               << getValueName(tanhOp.getOperand()) << ");\n";
+}
+
+void CUDAGenerator::codegen(mlir::math::SqrtOp sqrtOp) {
+  indent();
+  source << "auto " << getValueName(sqrtOp.getResult()) << " = sqrtf("
+               << getValueName(sqrtOp.getOperand()) << ");\n";
+}
+
+void CUDAGenerator::codegen(mlir::math::LogOp logOp) {
+  indent();
+  source << "auto " << getValueName(logOp.getResult()) << " = logf("
+               << getValueName(logOp.getOperand()) << ");\n";
+}
+
+void CUDAGenerator::codegen(mlir::arith::BitcastOp castOp) {
+  indent();
+  // addInclude(source, "cuda_math.h");
+
+  auto result = castOp.getResult();
+    llvm::outs() << result.getType() << "\n";
+  // auto memrefType = result.getType().dyn_cast<mlir::MemRefType>();
+  // auto elementType = memrefType.getElementType();
+  source << "auto " << getValueName(result) << " = static_cast<" 
+                << toCStr(result.getType()) << ">("
+                << getValueName(castOp.getOperand()) << ");\n";
+}
+
+void CUDAGenerator::codegen(mlir::arith::CmpFOp cmpOp) {
+  indent();
+  auto cmp_type = cmpOp.getPredicate();
+  switch(cmp_type){
+    case mlir::arith::CmpFPredicate::OEQ:
+      source << "auto " << getValueName(cmpOp.getResult()) << " = "
+            << getValueName(cmpOp.getLhs()) << " == "
+            << getValueName(cmpOp.getRhs()) << ";\n";
+      break;
+    case mlir::arith::CmpFPredicate::OGT:
+      source << "auto " << getValueName(cmpOp.getResult()) << " = "
+            << getValueName(cmpOp.getLhs()) << " > "
+            << getValueName(cmpOp.getRhs()) << ";\n";
+    break;
+  }
 }
 
 void CUDAGenerator::codegen(mlir::math::ExpOp expOp) {
@@ -742,6 +833,16 @@ void CUDAGenerator::codegen(mlir::AffineForOp forOp) {
         this->codegen(mulOp);
       } else if (auto addOp = mlir::dyn_cast<mlir::arith::AddFOp>(&op)) {
         this->codegen(addOp);
+      } else if (auto powOp = mlir::dyn_cast<mlir::math::PowFOp>(&op)) {
+        this->codegen(powOp);
+      } else if (auto cmpOp = mlir::dyn_cast<mlir::arith::CmpFOp>(&op)) {
+        this->codegen(cmpOp);
+      } else if (auto tanhOp = mlir::dyn_cast<mlir::math::TanhOp>(&op)) {
+        this->codegen(tanhOp);
+      } else if (auto sqrtOp = mlir::dyn_cast<mlir::math::SqrtOp>(&op)) {
+        this->codegen(sqrtOp);
+      } else if (auto logOp = mlir::dyn_cast<mlir::math::LogOp>(&op)) {
+        this->codegen(logOp);
       } else if (auto divOp = mlir::dyn_cast<mlir::arith::DivFOp>(&op)) {
         this->codegen(divOp);
       } else if (auto barrierOp = mlir::dyn_cast<mlir::gpu::BarrierOp>(&op)) {
@@ -836,6 +937,22 @@ void CUDAGenerator::codegen(mlir::AffineParallelOp node) {
             this->codegen(mulOp);
           } else if (auto addOp = mlir::dyn_cast<mlir::arith::AddFOp>(&innerOp)) {
             this->codegen(addOp);
+          } else if (auto divOp = mlir::dyn_cast<mlir::arith::DivFOp>(&innerOp)) {
+            this->codegen(divOp);
+          } else if (auto subOp = mlir::dyn_cast<mlir::arith::SubFOp>(&innerOp)) {
+            this->codegen(subOp);
+          } else if (auto powOp = mlir::dyn_cast<mlir::math::PowFOp>(&innerOp)) {
+            this->codegen(powOp);
+          } else if (auto cmpOp = mlir::dyn_cast<mlir::arith::CmpFOp>(&innerOp)) {
+            this->codegen(cmpOp);
+          } else if (auto tanhOp = mlir::dyn_cast<mlir::math::TanhOp>(&innerOp)) {
+            this->codegen(tanhOp);
+          } else if (auto sqrtop = mlir::dyn_cast<mlir::math::SqrtOp>(&innerOp)) {
+            this->codegen(sqrtop);
+          } else if (auto logop = mlir::dyn_cast<mlir::math::LogOp>(&innerOp)) {
+            this->codegen(logop);
+          } else if (auto castOp = mlir::dyn_cast<mlir::arith::BitcastOp>(&innerOp)) {
+            this->codegen(castOp);
           } else if (auto barrierOp = mlir::dyn_cast<mlir::gpu::BarrierOp>(&innerOp)) {
             this->codegen(barrierOp);
           } else {

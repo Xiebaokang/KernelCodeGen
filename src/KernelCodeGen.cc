@@ -40,6 +40,45 @@ mlir::ModuleOp& KernelCodeGenerator::optimize(ComputeDAG& graph_) {
           }
         }
       }
+    } else if (*opt == BinaryOptimizer()) {
+      for (auto& binaryConfig : binaryConfigs) {
+        BinaryOptimizer::binaryConfig = binaryConfig;
+        resetModule(module);
+        if (opt->applicable(module)) {
+          opt->applyOptimzer(module, builder);
+          auto curLatency = evaluate(module);
+          if (curLatency < minLatency) {
+            minLatency = curLatency;
+            saveBestModule(module);
+          }
+        }
+      }
+    } else if (*opt == ElementWiseOptimizer()) {
+      for (auto& elementWiseConfig : elementWiseConfigs) {
+        ElementWiseOptimizer::elementWiseConfig = elementWiseConfig;
+        resetModule(module);
+        if (opt->applicable(module)) {
+          opt->applyOptimzer(module, builder);
+          auto curLatency = evaluate(module);
+          if (curLatency < minLatency) {
+            minLatency = curLatency;
+            saveBestModule(module);
+          }
+        }
+      }
+    } else if (*opt == LayerNormOptimizer()) {
+      for (auto& layerNormConfig : layerNormConfigs) {
+        LayerNormOptimizer::layerNormConfig = layerNormConfig;
+        resetModule(module);
+        if (opt->applicable(module)) {
+          opt->applyOptimzer(module, builder);
+          auto curLatency = evaluate(module);
+          if (curLatency < minLatency) {
+            minLatency = curLatency;
+            saveBestModule(module);
+          }
+        }
+      }
     } else if (opt->applicable(module)) {
       opt->applyOptimzer(module, builder);
       auto curLatency = evaluate(module);

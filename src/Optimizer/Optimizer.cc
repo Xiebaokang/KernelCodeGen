@@ -13,6 +13,9 @@ namespace KernelCodeGen {
 
 std::map<std::string, int> MatmulOptimizer::matmulConfig;
 std::map<std::string, int> FMHAOptimizer::fmhaConfig;
+std::map<std::string, int> BinaryOptimizer::binaryConfig;
+std::map<std::string, int> ElementWiseOptimizer::elementWiseConfig;
+std::map<std::string, int> LayerNormOptimizer::layerNormConfig;
 
 struct LoadOrStoreOp {
   enum MemRSKind {
@@ -546,6 +549,720 @@ void MatmulOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& bui
     DUMP(module);
   }
 }
+
+
+/*----------------------------binary---------------------------------*/
+
+std::vector<int64_t> getCreateAffineMapArgs(std::vector<mlir::AffineForOp> loops) {
+  std::vector<int64_t> extras;
+  extras.push_back(loops.size());
+  for (int i=0; i<loops.size(); i++) {
+    auto sum = 1;
+    for (int j=i+1; j<loops.size(); j++) {
+      sum *= loops[j].getUpperBoundMap().getSingleConstantResult();
+    }
+    if (i != extras[0] -1) {extras.push_back(sum);}
+    else {extras.push_back(loops.back().getUpperBoundMap().getSingleConstantResult());}
+  }
+  return extras;
+}
+
+bool BinaryOptimizer::applicable(mlir::ModuleOp& module) {
+  clear();
+  auto&& binaryFuncs = Analyzer::collectFunctions(module, "Binary");
+  bool res = binaryFuncs.size() != 0 ? true : false;
+
+  for (auto& binaryFunc : binaryFuncs) {
+    if (binarys.count(binaryFunc) != 0 || binaryLoops.count(binaryFunc) != 0
+      || binaryBuffers.count(binaryFunc) != 0) {
+      llvm::errs() << "Duplicated binary in module\n";
+    }
+    binarys.insert(binaryFunc);
+    auto&& loops = Analyzer::collectFuncLoops(binaryFunc);
+    binaryLoops[binaryFunc] = std::move(loops);
+    auto funcArgs = binaryFunc.front().getArguments();
+
+    MemoryBuffer ABC;
+    ABC.A = funcArgs[0];
+    if (funcArgs.size() == 2) {ABC.B = funcArgs[1];}
+    else {ABC.B = nullptr;}
+    auto &block = binaryFunc.front();
+    auto returnOp = mlir::dyn_cast<mlir::func::ReturnOp>(block.back());
+    ABC.C = returnOp.getOperand(0);
+    binaryBuffers[binaryFunc] = ABC;
+  }
+  return res;
+  // clear();
+  // auto&& funcCalls = Analyzer::collectFuncCalls(module);
+  // for (auto funcCall : funcCalls) {
+  //   auto funcName = funcCall.getCallee().str();
+  //   if (funcName.find(std::string("Binary")) != std::string::npos) {
+  //     auto binaryFunc = Analyzer::getTargetFunction(module, funcName);
+  //     auto attr = binaryFunc->getAttr(std::string("func.state")).dyn_cast<mlir::StringAttr>();
+  //     if (attr.str() != std::string("cpu")) continue;
+  //     if (binarys.count(binaryFunc) != 0 || binaryLoops.count(binaryFunc) != 0 || binaryBuffers.count(binaryFunc) != 0) continue;
+      
+  //     binarys.insert(binaryFunc);
+  //     auto&& loops = Analyzer::collectFuncLoops(binaryFunc);
+  //     binaryLoops[binaryFunc] = std::move(loops);
+  //     MemoryBuffer buf;
+  //     auto binaryArgs = funcCall.getArgOperands();
+  //     buf.A = binaryArgs[0];
+  //     if (binaryArgs.size() == 2) { buf.B = binaryArgs[1]; }
+  //     else { buf.B = nullptr; }
+  //     buf.C = funcCall.getResult(0);
+  //     binaryBuffers[binaryFunc] = buf;
+  //   }
+  // }
+  // if (binarys.size()) return true;
+  // return false;
+}
+
+mlir::AffineMap BinaryOptimizer::getAffineMap(const std::string& mapIdentifier, mlir::OpBuilder& builder, 
+                                              const std::vector<int64_t> &extras, const int needDimNums, const int oneDimNums) {
+  auto dim0 = builder.getAffineDimExpr(0);
+  auto dim1 = builder.getAffineDimExpr(1);
+  auto dim2 = builder.getAffineDimExpr(2);
+  auto dim3 = builder.getAffineDimExpr(3);
+  auto dim4 = builder.getAffineDimExpr(4);
+  auto dim5 = builder.getAffineDimExpr(5);
+  auto dim6 = builder.getAffineDimExpr(6);
+  auto width = 4;  // float4 type width
+
+  if (mapIdentifier == "MaxLoadOrStore") {
+    auto oneDimExpr_y = dim0 + dim1 + dim2;
+    auto oneDimExpr_x = dim3 + dim4 + dim5 * width;
+    llvm::SmallVector<mlir::AffineExpr> exprs;
+    if (extras[0] == 2) {
+      exprs.push_back(oneDimExpr_y);
+      exprs.push_back(oneDimExpr_x);
+    } else {
+      auto oneDimExpr = oneDimExpr_y * extras.back() + oneDimExpr_x;  // 这个是多维映射到一维的index
+      for (int i=0; i<extras[0]; i++) {  // [old_loops_len, 5120, 256, 256, 80]
+        if (i == 0) {
+          exprs.push_back(oneDimExpr.floorDiv(extras[i+1]));
+        } else if (i != extras[0] - 1) {
+          auto tmpExpr = oneDimExpr % extras[i];
+          exprs.push_back(tmpExpr.floorDiv(extras[i+1]));
+        } else {
+          exprs.push_back(oneDimExpr % extras[i+1]);
+        }
+      }
+    }
+    return mlir::AffineMap::get(/*dimCount*/6, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+  } else if (mapIdentifier == "MinVectorLoad") {
+    llvm::SmallVector<mlir::AffineExpr> exprs;
+    if (extras[0] == 2) {
+      if (oneDimNums) {
+        exprs.push_back(dim0);
+        auto expr = dim1 + dim2 + dim3 * width;
+        exprs.push_back(expr);
+        return mlir::AffineMap::get(/*dimCount*/4, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+      }
+      auto expr = dim0 + dim1 + dim2 * width;
+      exprs.push_back(expr);
+      return mlir::AffineMap::get(/*dimCount*/3, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+    }
+    mlir::AffineExpr oneDimExpr_y, oneDimExpr_x;
+    if (oneDimNums) {
+      oneDimExpr_y = dim1 + dim2 + dim3;
+      oneDimExpr_x = dim4 + dim5 + dim6 * width;
+      for (int i=0; i<oneDimNums; i++) {exprs.push_back(dim0);}
+    } else {
+      oneDimExpr_y = dim0 + dim1 + dim2;
+      oneDimExpr_x = dim3 + dim4 + dim5 * width;
+    }
+    auto oneDimExpr = oneDimExpr_y * extras.back() + oneDimExpr_x;
+
+    for (int i=extras[0] - needDimNums; i<extras[0]; i++) {
+      if (i == 0) {
+        exprs.push_back(oneDimExpr.floorDiv(extras[i+1]));
+      } else if (i != extras[0] - 1) {
+        auto tmpExpr = oneDimExpr % extras[i];
+        exprs.push_back(tmpExpr.floorDiv(extras[i+1]));
+      } else {
+        exprs.push_back(oneDimExpr % extras[i+1]);
+      }
+    }
+    auto dimCount = 6;
+    if (oneDimNums) {dimCount++;}
+    // llvm::outs() << oneDimNums << "\n\n";
+    // for (auto exp : exprs) { llvm::outs() << exp << "\n"; }
+    // llvm::outs() << "\n";
+    return mlir::AffineMap::get(dimCount, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+  } else if (mapIdentifier == "CacheLoadOrStore") {
+    llvm::SmallVector<mlir::AffineExpr> exprs;
+    exprs.push_back(dim0);
+    return mlir::AffineMap::get(/*dimCount*/1, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+  } else {
+    assert(false);
+  }
+}
+
+void BinaryOptimizer::getBinaryOpData(mlir::Value max_load, mlir::Value min_load, BinaryOpData &data) {
+  auto max_type = max_load.getType();
+  auto max_shape = max_type.dyn_cast<mlir::MemRefType>().getShape();
+  if (!min_load) {  // 常数
+    data.type = BinaryType::constant;
+  } else {  // 不为常数
+    auto min_type = min_load.getType();
+    auto min_shape = min_type.dyn_cast<mlir::MemRefType>().getShape();
+    bool shapeIsOne = true;   // check全部为1
+    for (auto shape : min_shape) {
+      if (shape != 1) {shapeIsOne = false; break;}
+    }
+    if (shapeIsOne) {  // 全为1
+      data.type = BinaryType::allOne;
+    } else {
+      if (min_shape.size() == max_shape.size()) {  // 维度相等
+        bool shapeEq = true;
+        for (int i=0; i<max_shape.size(); i++) {  // check 全部相等
+          if (min_shape[i] != max_shape[i]) {shapeEq = false; break;}
+        }
+        if (shapeEq) {  // shape位全部相等
+          data.type = BinaryType::allEqual;
+        } else {  // shape位不全等
+          bool lenEqLastEq = true, first = false;
+          for (int i=0; i<max_shape.size(); i++) {
+            if (min_shape[i] != max_shape[i]){
+              if (first) {lenEqLastEq = false;}
+              data.oneDimNums++;
+            } else {
+              first = true;
+              data.needDimNums++;
+            }
+          }
+          if (lenEqLastEq) {  //维度相等，shape不等，按顺序
+            data.type = BinaryType::hasOneOrder;
+          } else {   // 维度相等，shape不等，无顺序
+            data.type = BinaryType::hasOneUnorder;
+          }
+        }
+      } else {  // 维度不等
+        bool lastEq = true, shrotLastEq = true, first = false;
+        int dst = max_shape.size() - min_shape.size();
+        for (int i=0; i<min_shape.size(); i++) {
+          if (max_shape[i+dst] != min_shape[i]) {
+            lastEq = false;
+            if (first) {shrotLastEq = false;}
+            data.oneDimNums++;
+          } else {
+            first = true;
+            data.needDimNums++;
+            }
+        }
+        if (lastEq) {   // 维度不等，shape相等
+          data.type = BinaryType::noOneOrder;
+        } else if (shrotLastEq){  // 维度不等，shape不等, 有序
+          data.type = BinaryType::hasOneOrder;
+        } else {  // 维度相等，shape不等，无序
+          data.type = BinaryType::hasOneUnorder;
+        }
+      }
+    }
+  }
+}
+
+llvm::SmallVector<mlir::Value> BinaryOptimizer::getMinLoadOperands(int dim, llvm::SmallVector<mlir::Value> operands, const mlir::Value cst) {
+  llvm::SmallVector<mlir::Value> minOperands;
+  if (dim == 2) {
+    if (cst) { minOperands = {cst, operands[0], operands[3]}; } 
+    else { minOperands = {operands[0], operands[3]}; }
+  } else {
+    minOperands = operands;
+    if (cst) { minOperands.insert(minOperands.begin() + 0, cst); }
+  }
+  // for (auto exp : minOperands) { llvm::outs() << exp << "\n"; }
+  // llvm::outs() << "\n";
+  return minOperands;
+}
+
+void BinaryOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& builder) {
+  for (auto binary : binarys) {
+    auto loops = binaryLoops[binary];
+    auto buffers = binaryBuffers[binary];
+    auto max_load = buffers.A, min_load = buffers.B, result_store = buffers.C;
+
+    auto extras = getCreateAffineMapArgs(loops);
+    auto new_loops = Rewriter::combineToTowDim(loops);   // 
+    extras.push_back(new_loops[1].getUpperBoundMap().getSingleConstantResult());
+    auto dimY = new_loops[0].getUpperBoundMap().getSingleConstantResult();
+    auto dimX = new_loops[1].getUpperBoundMap().getSingleConstantResult();
+
+    DUMP(module);
+    // 循环切块大小
+    auto split_out_loops = Rewriter::split(new_loops[0], 3, {binaryConfig["THREAD_SIZE_M"], binaryConfig["BLOCK_SIZE_M"]});  // 第一个是一个thread计算的维度，第二个是一个block计算的多大的维度
+    auto split_in_loops = Rewriter::split(new_loops[1], 3, {binaryConfig["THREAD_SIZE_N"], binaryConfig["BLOCK_SIZE_N"]});   // 
+    DUMP(module);
+
+    auto out_outer = split_out_loops[0], out_mider = split_out_loops[1], out_inner = split_out_loops[2];
+    auto in_outer = split_in_loops[0], in_mider = split_in_loops[1], in_inner = split_in_loops[2];
+    Rewriter::reorder({out_outer, in_outer, out_mider, in_mider, out_inner, in_inner});
+    DUMP(module);
+
+    auto gridLevel = Rewriter::parallel({out_outer, in_outer});
+    auto blockLevel = Rewriter::parallel({out_mider, in_mider});
+    DUMP(module);
+
+    auto *op = gridLevel->getParentOp();
+    auto funcOp = mlir::dyn_cast<mlir::func::FuncOp>(op);
+    funcOp->setAttr(std::string("func.state"), builder.getStringAttr("gpu"));
+
+    auto blockElemIdx = Rewriter::getElementIdx(gridLevel);
+    auto ThreadElemIdx = Rewriter::getElementIdx(blockLevel);
+    
+    if (dimX % binaryConfig["THREAD_SIZE_N"] || dimY % binaryConfig["THREAD_SIZE_M"]) {
+      std::vector<int> range{dimY, dimX, binaryConfig["THREAD_SIZE_M"], binaryConfig["THREAD_SIZE_N"]};
+      llvm::SmallVector<mlir::Value> operands{blockElemIdx[0], blockElemIdx[1], ThreadElemIdx[0], ThreadElemIdx[1]};  // by bx ty tx
+      auto ifop = Rewriter::irregularMat(out_inner, range, operands);
+      DUMP(module);
+    } else {
+      auto max_type = max_load.getType().dyn_cast<mlir::MemRefType>();
+      auto element = max_type.getElementType();
+
+      auto loadOrStoreMap = getAffineMap("MaxLoadOrStore", builder, extras);
+      auto cacheLoadOrStore = getAffineMap("CacheLoadOrStore", builder);
+
+      auto frag_a = Rewriter::alloc_buffer(/*parallelLevel*/blockLevel, MemorySpace::local, {binaryConfig["THREAD_SIZE_N"]}, element);  // 计算A -> reg
+      auto frag_c = Rewriter::alloc_buffer(/*parallelLevel*/blockLevel, MemorySpace::local, {binaryConfig["THREAD_SIZE_N"]}, element);  // 计算c -> reg
+
+      llvm::SmallVector<mlir::Value> operands{blockElemIdx[0], ThreadElemIdx[0], out_inner.getInductionVar(), blockElemIdx[1], ThreadElemIdx[1]};
+      auto load_a = Rewriter::read(max_load, frag_a, loadOrStoreMap, operands, binaryConfig["VECTORIZE_WIDTH"], out_inner, Position::begin);
+      auto store_c = Rewriter::write(frag_c, result_store, loadOrStoreMap, operands, binaryConfig["VECTORIZE_WIDTH"], in_inner, Position::after);
+      DUMP(module);
+
+      Rewriter::cache_read(in_inner, max_load, frag_a, cacheLoadOrStore, {in_inner.getInductionVar()});
+      Rewriter::cache_write(in_inner, result_store, frag_c, cacheLoadOrStore, {in_inner.getInductionVar()});
+      DUMP(module);
+
+      BinaryOpData data;
+      getBinaryOpData(max_load, min_load, data);   // 判断binary操作是什么类型的
+
+      switch (data.type) {
+        case BinaryType::constant: { //加常数（2，20，256） 1
+          in_inner.walk<mlir::WalkOrder::PreOrder>([&](mlir::arith::ConstantOp cst) {
+            Rewriter::schedule(cst, out_inner, Position::before);
+          });
+          break;
+        }
+        case BinaryType::allOne: { //全为1（2，20，256）（1, 1, 1）
+          in_inner.walk<mlir::WalkOrder::PreOrder>([&](mlir::arith::ConstantOp cst) {
+            Rewriter::schedule(cst, out_inner, Position::before);
+          });
+          in_inner.walk<mlir::WalkOrder::PreOrder>([&](mlir::AffineLoadOp loadOp) {
+            if (loadOp.getMemref() == min_load){
+              Rewriter::schedule(loadOp, out_inner, Position::before);
+            }
+          });
+          break;
+        }
+        case BinaryType::allEqual: { // 维度相等，shape相等（2，20，256）（2，20，256） vcetorize all
+          auto min_type = min_load.getType();
+          auto element_ = min_type.dyn_cast<mlir::MemRefType>().getElementType();
+          auto frag_b = Rewriter::alloc_buffer(/*parallelLevel*/blockLevel, MemorySpace::local, {binaryConfig["THREAD_SIZE_N"]}, element_);  // 计算b -> reg
+          auto load_b = Rewriter::read(min_load, frag_b, loadOrStoreMap, operands, binaryConfig["VECTORIZE_WIDTH"], load_a, Position::after);
+          Rewriter::cache_read(in_inner, min_load, frag_b, cacheLoadOrStore, {in_inner.getInductionVar()});
+          break;
+        }
+        case BinaryType::hasOneOrder: { // 维度相等，shape不等，按顺序（2， 20， 256） （1， 20， 256） vcetorize all
+          auto min_type = min_load.getType();
+          auto element_ = min_type.dyn_cast<mlir::MemRefType>().getElementType();
+          auto frag_b = Rewriter::alloc_buffer(/*parallelLevel*/blockLevel, MemorySpace::local, {binaryConfig["THREAD_SIZE_N"]}, element_);  // 计算b -> reg
+          mlir::Value cst;
+          in_inner.walk<mlir::WalkOrder::PreOrder>([&](mlir::arith::ConstantIndexOp cstOp) {
+            Rewriter::schedule(cstOp, blockLevel, Position::begin);
+            cst = cstOp.getResult();
+          });
+          auto minVectorLoad = getAffineMap("MinVectorLoad", builder, extras, data.needDimNums, data.oneDimNums);
+          auto minOperands = getMinLoadOperands(extras[0], operands, cst);
+          auto load_b = Rewriter::read(min_load, frag_b, minVectorLoad, minOperands, binaryConfig["VECTORIZE_WIDTH"], load_a, Position::after);
+          Rewriter::cache_read(in_inner, min_load, frag_b, cacheLoadOrStore, {in_inner.getInductionVar()});
+          break;
+        }
+        case BinaryType::noOneOrder: { // 维度不等/后续相等(2, 20, 256)  (20, 256) vcetorize all
+          auto min_type = min_load.getType();
+          auto element_ = min_type.dyn_cast<mlir::MemRefType>().getElementType();
+          auto frag_b = Rewriter::alloc_buffer(/*parallelLevel*/blockLevel, MemorySpace::local, {binaryConfig["THREAD_SIZE_N"]}, element_);  // 计算b -> reg
+          auto minVectorLoad = getAffineMap("MinVectorLoad", builder, extras, data.needDimNums, data.oneDimNums);
+          auto minOperands = getMinLoadOperands(extras[0], operands);
+          auto load_b = Rewriter::read(min_load, frag_b, minVectorLoad, minOperands, binaryConfig["VECTORIZE_WIDTH"], load_a, Position::after);
+          Rewriter::cache_read(in_inner, min_load, frag_b, cacheLoadOrStore, {in_inner.getInductionVar()});
+          break;
+        }
+        case BinaryType::hasOneUnorder: { // 维度不等/后续不等/后后续不等（2，20，256）（20，1） vcetorize max
+          // auto min_type = min_load.getType();
+          // auto element_ = min_type.dyn_cast<mlir::MemRefType>().getElementType();
+          // auto noVectorLoadOrStore = getAffineMap("NoVectorLoadOrStore", builder, extras);
+          // auto frag_b = Rewriter::alloc_buffer(/*parallelLevel*/blockLevel, MemorySpace::local, {binaryConfig["THREAD_SIZE_N"]}, element_);  // 计算b -> reg
+          // auto load_b = Rewriter::noVcetorRead(min_load, frag_b, noVectorLoadOrStore, operands, load_a, Position::after);
+          // Rewriter::cache_read(in_inner, min_load, frag_b, cacheLoadOrStore, {in_inner.getInductionVar()});
+          in_inner.walk<mlir::WalkOrder::PreOrder>([&](mlir::arith::ConstantOp cst) {
+            Rewriter::schedule(cst, out_inner, Position::before);
+          });
+          break;
+        }
+        default:
+          assert(false);
+      }
+      DUMP(module); 
+    }
+  }
+  Rewriter::unroll(module, [&](mlir::AffineForOp forOp)->bool {
+  if (!forOp.hasConstantBounds()) return false;  // 判断forop的上界和下界是否是已知量，这个可以直接手动去除循环结构
+  auto step = forOp.getStep();
+  auto ub = forOp.getConstantUpperBound();
+  auto lb = forOp.getConstantLowerBound();
+  auto times = (ub - lb) / step;
+  // if (times >= std::min<int64_t>(64, 4)) return false;
+  if (times >= 2) return false;
+  return true;
+  });
+  DUMP(module);
+
+  Rewriter::unrollAttribute(module, [&](mlir::AffineForOp forOp)->bool {   // 这种循环是可以添加pragma unroll的
+  if (!forOp.hasConstantBounds()) return false;
+  auto step = forOp.getStep();
+  auto ub = forOp.getConstantUpperBound();
+  auto lb = forOp.getConstantLowerBound();
+  auto times = (ub - lb) / step;
+  if (times > 64) return false;
+  return true;
+  });
+  DUMP(module);
+}
+/*--------------------------------------------------------------------*/
+
+/*-----------------------------elementwise----------------------------*/
+bool ElementWiseOptimizer::applicable(mlir::ModuleOp& module) {
+  clear();
+  auto&& elementWiseFuncs = Analyzer::collectFunctions(module, "Elementwise");
+  bool res = elementWiseFuncs.size() != 0 ? true : false;
+
+  for (auto& elementWiseFunc : elementWiseFuncs) {
+    if (elementWises.count(elementWiseFunc) != 0 || elementWiseLoops.count(elementWiseFunc) != 0
+      || elementWiseBuffers.count(elementWiseFunc) != 0) {
+      llvm::errs() << "Duplicated Elementwise in module\n";
+    }
+    elementWises.insert(elementWiseFunc);
+    auto&& loops = Analyzer::collectFuncLoops(elementWiseFunc);
+    elementWiseLoops[elementWiseFunc] = std::move(loops);
+    auto funcArgs = elementWiseFunc.front().getArguments();
+
+    MemoryBuffer buf;
+    buf.input = funcArgs[0];
+    auto &block = elementWiseFunc.front();
+    auto returnOp = mlir::dyn_cast<mlir::func::ReturnOp>(block.back());
+    buf.output = returnOp.getOperand(0);
+    elementWiseBuffers[elementWiseFunc] = buf;
+  }
+  return res;
+}
+
+mlir::AffineMap ElementWiseOptimizer::getAffineMap(const std::string& mapIdentifier, mlir::OpBuilder& builder, const std::vector<int64_t> &extras) {
+  auto dim0 = builder.getAffineDimExpr(0);
+  auto dim1 = builder.getAffineDimExpr(1);
+  auto dim2 = builder.getAffineDimExpr(2);
+  auto dim3 = builder.getAffineDimExpr(3);
+  auto dim4 = builder.getAffineDimExpr(4);
+  auto dim5 = builder.getAffineDimExpr(5);
+  auto width = 4;  // float4 type width
+
+  if (mapIdentifier == "VectorLoadOrStore") {
+    auto oneDimExpr_y = dim0 + dim1 + dim2;
+    auto oneDimExpr_x = dim3 + dim4 + dim5 * width;
+    llvm::SmallVector<mlir::AffineExpr> exprs;
+    if (extras[0] == 2) {
+      exprs.push_back(oneDimExpr_y);
+      exprs.push_back(oneDimExpr_x);
+    } else {
+      auto oneDimExpr = oneDimExpr_y * extras.back() + oneDimExpr_x;  // 这个是多维映射到一维的index
+      for (int i=0; i<extras[0]; i++) {  // [old_loops_len, 5120, 256, 256, 80]
+        if (i == 0) {
+          exprs.push_back(oneDimExpr.floorDiv(extras[i+1]));
+        } else if (i != extras[0] - 1) {
+          auto tmpExpr = oneDimExpr % extras[i];
+          exprs.push_back(tmpExpr.floorDiv(extras[i+1]));
+        } else {
+          exprs.push_back(oneDimExpr % extras[i+1]);
+        }
+      }
+    }
+    return mlir::AffineMap::get(/*dimCount*/6, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+  } else if (mapIdentifier == "NoVectorLoadOrStore") {
+    auto oneDimExpr_y = dim0 + dim1 + dim2;
+    auto oneDimExpr_x = dim3 + dim4 + dim5;
+    llvm::SmallVector<mlir::AffineExpr> exprs;
+    if (extras[0] == 2) {
+      exprs.push_back(oneDimExpr_y);
+      exprs.push_back(oneDimExpr_x);
+    } else {
+      auto oneDimExpr = oneDimExpr_y * extras.back() + oneDimExpr_x;  // 这个是多维映射到一维的index
+      for (int i=0; i<extras[0]; i++) {  // [old_loops_len, 5120, 256, 256, 80]
+        if (i == 0) {
+          exprs.push_back(oneDimExpr.floorDiv(extras[i+1]));
+        } else if (i != extras[0] - 1) {
+          auto tmpExpr = oneDimExpr % extras[i];
+          exprs.push_back(tmpExpr.floorDiv(extras[i+1]));
+        } else {
+          exprs.push_back(oneDimExpr % extras[i+1]);
+        }
+      }
+    }
+    return mlir::AffineMap::get(/*dimCount*/6, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+  } else if (mapIdentifier == "PointLoadOrStore") {
+    llvm::SmallVector<mlir::AffineExpr> exprs;
+    exprs.push_back(dim0);
+    return mlir::AffineMap::get(/*dimCount*/1, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+  } else {
+    assert(false);
+  }
+}
+
+void ElementWiseOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& builder) {
+  for (auto elementwise : elementWises) {
+    auto loops = elementWiseLoops[elementwise];
+    auto buffer = elementWiseBuffers[elementwise];
+    auto input = buffer.input; auto output = buffer.output;
+    auto extras = getCreateAffineMapArgs(loops);
+    auto new_loops = Rewriter::combineToTowDim(loops);
+    extras.push_back(new_loops[1].getUpperBoundMap().getSingleConstantResult());
+    auto dimY = new_loops[0].getUpperBoundMap().getSingleConstantResult();
+    auto dimX = new_loops[1].getUpperBoundMap().getSingleConstantResult();
+
+    DUMP(module);
+    // 循环切块大小
+    auto split_out_loops = Rewriter::split(new_loops[0], 3, {elementWiseConfig["THREAD_SIZE_M"], elementWiseConfig["BLOCK_SIZE_M"]});
+    auto split_in_loops = Rewriter::split(new_loops[1], 3, {elementWiseConfig["THREAD_SIZE_M"], elementWiseConfig["BLOCK_SIZE_M"]});
+    DUMP(module);
+
+    auto out_outer = split_out_loops[0], out_mider = split_out_loops[1], out_inner = split_out_loops[2];
+    auto in_outer = split_in_loops[0], in_mider = split_in_loops[1], in_inner = split_in_loops[2];
+    Rewriter::reorder({out_outer, in_outer, out_mider, in_mider, out_inner, in_inner});
+    DUMP(module);
+
+    auto gridLevel = Rewriter::parallel({out_outer, in_outer});
+    auto blockLevel = Rewriter::parallel({out_mider, in_mider});
+    DUMP(module);
+
+    auto blockElemIdx = Rewriter::getElementIdx(gridLevel);
+    auto ThreadElemIdx = Rewriter::getElementIdx(blockLevel);
+
+    in_inner.walk<mlir::WalkOrder::PreOrder>([&](mlir::arith::ConstantOp cst) {
+      Rewriter::schedule(cst, blockLevel, Position::begin);
+    });
+
+    if (dimX % elementWiseConfig["THREAD_SIZE_N"] || dimY % elementWiseConfig["THREAD_SIZE_M"]) {
+      std::vector<int> range{dimY, dimX, elementWiseConfig["THREAD_SIZE_M"], elementWiseConfig["THREAD_SIZE_N"]};
+      llvm::SmallVector<mlir::Value> operands{blockElemIdx[0], blockElemIdx[1], ThreadElemIdx[0], ThreadElemIdx[1]};  // by bx ty tx
+      auto ifop = Rewriter::irregularMat(out_inner, range, operands);
+      DUMP(module);
+    } else {
+      auto input_type = input.getType();
+      auto element = input_type.dyn_cast<mlir::MemRefType>().getElementType();
+
+      auto loadOrStoreMap = getAffineMap("VectorLoadOrStore", builder, extras);
+      auto pointLoadOrStore = getAffineMap("PointLoadOrStore", builder);
+      llvm::SmallVector<mlir::Value> operands({blockElemIdx[0], ThreadElemIdx[0], out_inner.getInductionVar(), blockElemIdx[1], ThreadElemIdx[1]});
+
+      if (input != output) {
+        auto output_type = output.getType();
+        auto element_ = output_type.dyn_cast<mlir::MemRefType>().getElementType();
+        auto noVectorLoadOrStore = getAffineMap("NoVectorLoadOrStore", builder, extras);
+        auto frag = Rewriter::alloc_buffer(/*parallelLevel*/blockLevel, MemorySpace::local, {elementWiseConfig["THREAD_SIZE_N"]}, element);  // 计算input -> reg
+        auto frag_ = Rewriter::alloc_buffer(/*parallelLevel*/blockLevel, MemorySpace::local, {elementWiseConfig["THREAD_SIZE_N"]}, element_);  // 计算input -> reg
+        if (toStr(element) == "float32") {
+          Rewriter::read(input, frag, loadOrStoreMap, operands, elementWiseConfig["VECTORIZE_WIDTH"], out_inner, Position::begin);
+          Rewriter::noVcetorWrite(frag_, output, noVectorLoadOrStore, operands, in_inner, Position::after);
+        } else if (toStr(element_) == "float32"){
+          Rewriter::noVcetorRead(input, frag, noVectorLoadOrStore, operands, out_inner, Position::begin);
+          Rewriter::write(frag_, output, loadOrStoreMap, operands, elementWiseConfig["VECTORIZE_WIDTH"], in_inner, Position::after);
+        }
+        Rewriter::cache_read(in_inner, input, frag, pointLoadOrStore, {in_inner.getInductionVar()});
+        Rewriter::cache_write(in_inner, output, frag_, pointLoadOrStore, {in_inner.getInductionVar()});
+      } else {
+        auto frag = Rewriter::alloc_buffer(/*parallelLevel*/blockLevel, MemorySpace::local, {elementWiseConfig["THREAD_SIZE_N"]}, element);  // 计算input -> reg
+        Rewriter::read(input, frag, loadOrStoreMap, operands, elementWiseConfig["VECTORIZE_WIDTH"], out_inner, Position::begin);
+        Rewriter::write(frag, input, loadOrStoreMap, operands, elementWiseConfig["VECTORIZE_WIDTH"], in_inner, Position::after);
+        Rewriter::cache_read(in_inner, input, frag, pointLoadOrStore, {in_inner.getInductionVar()});
+        Rewriter::cache_write(in_inner, input, frag, pointLoadOrStore, {in_inner.getInductionVar()});
+      }
+
+      DUMP(module);
+    }
+
+    Rewriter::unroll(module, [&](mlir::AffineForOp forOp)->bool {
+    if (!forOp.hasConstantBounds()) return false;  // 判断forop的上界和下界是否是已知量，这个可以直接手动去除循环结构
+    auto step = forOp.getStep();
+    auto ub = forOp.getConstantUpperBound();
+    auto lb = forOp.getConstantLowerBound();
+    auto times = (ub - lb) / step;
+    // if (times >= std::min<int64_t>(64, 4)) return false;
+    if (times >= 2) return false;
+    return true;
+    });
+    DUMP(module);
+
+    Rewriter::unrollAttribute(module, [&](mlir::AffineForOp forOp)->bool {   // 这种循环是可以添加pragma unroll的
+    if (!forOp.hasConstantBounds()) return false;
+    auto step = forOp.getStep();
+    auto ub = forOp.getConstantUpperBound();
+    auto lb = forOp.getConstantLowerBound();
+    auto times = (ub - lb) / step;
+    if (times > 64) return false;
+    return true;
+  });
+  DUMP(module);
+
+  }
+}
+/*--------------------------------------------------------------------*/
+
+/*----------------------------layernorm-------------------------------*/
+bool LayerNormOptimizer::applicable(mlir::ModuleOp& module) {
+  clear();
+  auto&& layerNormFuncs = Analyzer::collectFunctions(module, "LayerNorm");
+  bool res = layerNormFuncs.size() != 0 ? true : false;
+
+  for (auto& layerNormFunc : layerNormFuncs) {
+    if (layerNorms.count(layerNormFunc) != 0 || layerNormLoops.count(layerNormFunc) != 0
+      || layerNormBuffers.count(layerNormFunc) != 0) {
+      llvm::errs() << "Duplicated layerNorm in module\n";
+    }
+    layerNorms.insert(layerNormFunc);
+    auto&& loops = Analyzer::collectFuncLoops(layerNormFunc);
+    layerNormLoops[layerNormFunc] = std::move(loops);
+    auto funcArgs = layerNormFunc.front().getArguments();
+
+    MemoryBuffer buf;
+    buf.input = funcArgs[0];
+    auto &block = layerNormFunc.front();
+    auto returnOp = mlir::dyn_cast<mlir::func::ReturnOp>(block.back());
+    buf.output = returnOp.getOperand(0);
+    layerNormBuffers[layerNormFunc] = buf;
+  }
+  return res;
+}
+
+mlir::AffineMap LayerNormOptimizer::getAffineMap(const std::string& mapIdentifier, mlir::OpBuilder& builder, const std::vector<int64_t> &extras) {
+  auto dim0 = builder.getAffineDimExpr(0);
+  auto dim1 = builder.getAffineDimExpr(1);
+  auto dim2 = builder.getAffineDimExpr(2);
+  auto dim3 = builder.getAffineDimExpr(3);
+  auto width = 4;  // float4 type width
+
+  if (mapIdentifier == "VectorLoad") {
+    auto oneDimExpr = dim1 + dim2 + dim3 * width;
+    llvm::SmallVector<mlir::AffineExpr> exprs;
+    exprs.push_back(dim0);
+    if (extras[0] == 1) {
+      exprs.push_back(oneDimExpr);
+    } else {
+      for (int i=0; i<extras[0]; i++) {
+        if (i == 0) {
+          exprs.push_back(oneDimExpr.floorDiv(extras[i+1]));
+        } else if (i != extras[0] - 1) {
+          auto tmpExpr = oneDimExpr % extras[i];
+          exprs.push_back(tmpExpr.floorDiv(extras[i+1]));
+        } else {
+          exprs.push_back(oneDimExpr % extras[i+1]);
+        }
+      }
+    }
+    return mlir::AffineMap::get(/*dimCount*/4, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+  } else if (mapIdentifier == "VectorStore") {
+    llvm::SmallVector<mlir::AffineExpr> exprs;
+    exprs.push_back(dim0 + dim1 * width);
+    return mlir::AffineMap::get(/*dimCount*/2, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+  } else if (mapIdentifier == "PointLoadOrStore") {
+    llvm::SmallVector<mlir::AffineExpr> exprs;
+    exprs.push_back(dim0 + dim1);
+    return mlir::AffineMap::get(/*dimCount*/2, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+  } else {
+    assert(false);
+  }
+}
+
+void LayerNormOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& builder) {
+  for (auto layerNorm: layerNorms) {  // func
+    auto loops = layerNormLoops[layerNorm];
+    auto buffer = layerNormBuffers[layerNorm];
+    auto input = buffer.input; auto output = buffer.output;
+    std::vector<mlir::AffineForOp> sonLoops1, sonLoops2, sonLoops3;
+    int sonLoopsNum = (loops.size() - 1) / 3;
+    int iter1 = 1; int iter2 = iter1 + sonLoopsNum; int iter3 = iter2 + sonLoopsNum;
+    for (int i=0; i<sonLoopsNum; i++) {
+      sonLoops1.push_back(loops[iter1++]);
+      sonLoops2.push_back(loops[iter2++]);
+      sonLoops3.push_back(loops[iter3++]);
+    }
+    auto extras = getCreateAffineMapArgs(sonLoops1);
+
+    auto sonLoop1 = Rewriter::combineToOneDim(sonLoops1);
+    auto sonLoop2 = Rewriter::combineToOneDim(sonLoops2);
+    auto sonLoop3 = Rewriter::combineToOneDim(sonLoops3);
+    DUMP(module);
+
+    auto iterBuffer1 = Rewriter::bufferizeLoopCarryVar(sonLoop1, loops[0].getBody());
+    auto iterBuffer2 = Rewriter::bufferizeLoopCarryVar(sonLoop2, loops[0].getBody());
+    DUMP(module);
+
+    auto split_loops1 = Rewriter::split(sonLoop1, 3, {layerNormConfig["THREAD_SIZE"], layerNormConfig["BLOCK_SIZE"]});
+    auto split_loops2 = Rewriter::split(sonLoop2, 3, {layerNormConfig["THREAD_SIZE"], layerNormConfig["BLOCK_SIZE"]});
+    auto split_loops3 = Rewriter::split(sonLoop3, 3, {layerNormConfig["THREAD_SIZE"], layerNormConfig["BLOCK_SIZE"]});
+    DUMP(module);
+
+    // split_loops1[1]，split_loops2[1]，split_loops3[1] no exist
+    Rewriter::swapLoops({{split_loops1[0], split_loops1[1]}, {split_loops2[0], split_loops2[1]}, {split_loops3[0], split_loops3[1]}});
+    DUMP(module);
+    
+    auto gridLevel = Rewriter::parallel({loops[0]});
+    auto blockLevel1 = Rewriter::parallel({split_loops1[1]});
+    auto blockLevel2 = Rewriter::parallel({split_loops2[1]});  // no exist
+    auto blockLevel3 = Rewriter::parallel({split_loops3[1]});  // no exist
+    DUMP(module);
+
+    Rewriter::changeMemoryToShared(blockLevel2->getPrevNode(), iterBuffer1);
+    Rewriter::changeMemoryToShared(blockLevel3->getPrevNode(), iterBuffer2);
+    Rewriter::combineParallel({blockLevel1, blockLevel2, blockLevel3});
+    Rewriter::barrier(split_loops1[0], Position::after);
+    Rewriter::barrier(split_loops2[0], Position::after);
+    Rewriter::barrier(split_loops1[0], Position::before);
+    Rewriter::barrier(split_loops3[0], Position::before);
+    DUMP(module);
+
+    auto blockIdx = Rewriter::getParallelIdx(gridLevel);
+    auto ThreadElemIdx = Rewriter::getElementIdx(blockLevel1);
+
+    auto vecLoadMap = getAffineMap("VectorLoad", builder, extras);
+    auto vecStoreMap = getAffineMap("VectorStore", builder, extras);
+    auto pointMap = getAffineMap("PointLoadOrStore", builder, extras);
+    std::vector<mlir::AffineMap> vectorizeMaps({vecLoadMap, vecStoreMap});
+    std::vector<int64_t> widths(layerNormConfig["THREAD_SIZE"], layerNormConfig["VECTORIZE_WIDTH"]);
+
+    auto input_type = input.getType();
+    auto element = input_type.dyn_cast<mlir::MemRefType>().getElementType();
+    auto tempArray = Rewriter::alloc_buffer(gridLevel, MemorySpace::shared, {layerNormConfig["BLOCK_SIZE"]}, element);
+
+    llvm::SmallVector<mlir::Value> operands1({blockIdx[0], split_loops1[0].getInductionVar(), ThreadElemIdx[0]});
+    llvm::SmallVector<mlir::Value> operands2({blockIdx[0], split_loops2[0].getInductionVar(), ThreadElemIdx[0]});
+    llvm::SmallVector<mlir::Value> operands3({blockIdx[0], split_loops3[0].getInductionVar(), ThreadElemIdx[0]});
+
+    auto readLoop1 = Rewriter::read(input, tempArray, vectorizeMaps, operands1, widths, split_loops1[2], Position::before);
+    auto readLoop2 = Rewriter::read(input, tempArray, vectorizeMaps, operands2, widths, split_loops2[2], Position::before);
+    auto readLoop3 = Rewriter::read(input, tempArray, vectorizeMaps, operands3, widths, split_loops3[2], Position::before);
+
+    Rewriter::barrier(readLoop1, Position::after);
+    Rewriter::barrier(readLoop2, Position::after);
+    Rewriter::barrier(readLoop3, Position::after);
+
+    Rewriter::cache_read(split_loops1[2], input, tempArray, pointMap, {ThreadElemIdx[0], split_loops1[2].getInductionVar()});
+    Rewriter::cache_read(split_loops2[2], input, tempArray, pointMap, {ThreadElemIdx[0], split_loops2[2].getInductionVar()});
+    Rewriter::cache_read(split_loops3[2], input, tempArray, pointMap, {ThreadElemIdx[0], split_loops3[2].getInductionVar()});
+    DUMP(module);
+  }
+}
+/*--------------------------------------------------------------------*/
+
 
 void splitString(const std::string& input, char target, std::vector<std::string>& output) {
   std::string cur {""};

@@ -6,6 +6,10 @@ mlir::Type getDType(mlir::OpBuilder& builder, const std::string& dtype) {
   if(dtype == "float32") return builder.getF32Type();
   if(dtype == "float64") return builder.getF64Type();
   if(dtype == "float16") return builder.getF16Type();
+  if(dtype == "int32") return builder.getIntegerType(32);
+  if(dtype == "int") return builder.getIntegerType(8);
+  if(dtype == "index") return builder.getIndexType();
+  if(dtype == "bool") return builder.getIntegerType(1);
   return nullptr;
 }
 
@@ -13,7 +17,53 @@ std::string toStr(mlir::Type type) {
   if(type.isa<mlir::Float16Type>()) return {"float16"};
   if(type.isa<mlir::Float32Type>()) return {"float32"};
   if(type.isa<mlir::Float64Type>()) return {"float64"};
+  if(auto int_type = type.dyn_cast<mlir::IntegerType>()) {
+    if (int_type.getWidth() == 1) return {"bool"};
+    else if (int_type.getWidth() == 8) return {"int"};
+    else if (int_type.getWidth() == 32) return {"int32_t"};
+    else if (int_type.getWidth() == 64) return {"int64_t"};
+  }
+  if(type.isa<mlir::IndexType>()) return {"index"};
   return nullptr;
+}
+
+mlir::AffineForOp buildAffineLoopNest_(
+  mlir::OpBuilder &builder, mlir::Location loc, llvm::ArrayRef<int64_t> lbs, llvm::ArrayRef<int64_t> ubs, llvm::ArrayRef<int64_t> steps, 
+   mlir::ValueRange iterArgs, loopfunc bodyBuilderFn) {
+
+  assert(lbs.size() == ubs.size() && "Mismatch in number of arguments");
+  assert(lbs.size() == steps.size() && "Mismatch in number of arguments");
+  mlir::OpBuilder::InsertionGuard guard(builder);
+
+  mlir::AffineForOp main_loop;
+  mlir::AffineForOp out_loop = nullptr;
+  llvm::SmallVector<mlir::Value, 4> ivs;
+  ivs.reserve(lbs.size());
+  for (unsigned i = 0, e = lbs.size(); i < e; ++i) {
+    auto loopBody = [&](mlir::OpBuilder &builder_, mlir::Location loc_, mlir::Value iv_, mlir::ValueRange iterArgs_) {
+      ivs.push_back(iv_);
+      if (i == e - 1 && bodyBuilderFn) {
+        mlir::OpBuilder::InsertionGuard nestedGuard(builder_);
+        auto result = bodyBuilderFn(builder_, loc_, ivs, iterArgs_);
+        builder_.create<mlir::AffineYieldOp>(loc_, result);
+      } else {
+        builder_.create<mlir::AffineYieldOp>(loc_, iterArgs);
+      }
+    };
+    mlir::AffineForOp loop;
+    if (!out_loop) {
+      loop = builder.create<mlir::AffineForOp>(loc, lbs[i], ubs[i], steps[i], iterArgs, loopBody);
+      main_loop = loop;
+    } else {
+      loop = builder.create<mlir::AffineForOp>(loc, lbs[i], ubs[i], steps[i], out_loop.getRegionIterArgs()[0], loopBody);
+      out_loop.getBody()->back().erase();
+      builder.setInsertionPointToEnd(out_loop.getBody());
+      builder.create<mlir::AffineYieldOp>(loc, loop.getResult(0));
+    }
+    out_loop = loop;
+    builder.setInsertionPointToStart(loop.getBody());
+  }
+  return main_loop;
 }
 
 mlir::func::FuncOp buildFuction(mlir::ModuleOp module, mlir::OpBuilder& builder, 
@@ -535,6 +585,538 @@ mlir::Value Softmax::build(ComputeDAG* graph, mlir::Value input, int axis, Memor
     }
   );
   builder.create<mlir::func::ReturnOp>(builder.getUnknownLoc(), operands[0]);
+  builder.restoreInsertionPoint(ip);
+  auto callOp = builder.create<mlir::func::CallOp>(builder.getUnknownLoc(), funcOp, mlir::ValueRange({input}));
+  funcOp->setAttr(std::string("func.state"), builder.getStringAttr("cpu"));
+  return callOp.getResult(0);
+}
+
+/*------------------------------------Binary--------------------------------------*/
+mlir::Value Binary::add(mlir::OpBuilder& builder, mlir::Value elem_1, mlir::Value elem_2) {
+  return builder.create<mlir::arith::AddFOp>(builder.getUnknownLoc(), elem_1, elem_2);
+}
+
+mlir::Value Binary::mul(mlir::OpBuilder &builder, mlir::Value elem_1, mlir::Value elem_2){
+  return builder.create<mlir::arith::MulFOp>(builder.getUnknownLoc(), elem_1, elem_2);
+}
+
+mlir::Value Binary::div(mlir::OpBuilder &builder, mlir::Value elem_1, mlir::Value elem_2){
+  return builder.create<mlir::arith::DivFOp>(builder.getUnknownLoc(), elem_1, elem_2);
+}
+
+mlir::Value Binary::sub(mlir::OpBuilder &builder, mlir::Value elem_1, mlir::Value elem_2){
+  return builder.create<mlir::arith::SubFOp>(builder.getUnknownLoc(), elem_1, elem_2);
+}
+
+mlir::Value Binary::pow(mlir::OpBuilder &builder, mlir::Value elem_1, mlir::Value elem_2){
+  return builder.create<mlir::math::PowFOp>(builder.getUnknownLoc(), elem_1, elem_2);
+}
+
+mlir::Value Binary::equal(mlir::OpBuilder &builder, mlir::Value elem_1, mlir::Value elem_2){
+  return builder.create<mlir::arith::CmpFOp>(builder.getUnknownLoc(), mlir::arith::CmpFPredicate::OEQ, elem_1, elem_2);
+}
+
+mlir::Value Binary::greater(mlir::OpBuilder &builder, mlir::Value elem_1, mlir::Value elem_2){
+  return builder.create<mlir::arith::CmpFOp>(builder.getUnknownLoc(), mlir::arith::CmpFPredicate::OGT, elem_1, elem_2);
+}
+
+std::map<std::string, std::function<mlir::Value(mlir::OpBuilder&, mlir::Value, mlir::Value)>> Binary::operationMap = {
+    {"add", &Binary::add}, {"mul", &Binary::mul}, {"div", &Binary::div}, {"sub", &Binary::sub},
+    {"pow", &Binary::pow}, {"equal", &Binary::equal}, {"greater", &Binary::greater}
+  };
+/*-------------------------------------------------------------------------------------*/
+
+mlir::Value Binary::build(ComputeDAG* graph, mlir::Value A, mlir::Value B, std::string operation, MemorySpace ms, const std::string& dtype_) {
+  auto builder = graph->builder;
+  auto typeA = A.getType();
+  auto typeB = B.getType();
+
+  llvm::ArrayRef<int64_t> input_shapeA, input_shapeB;
+  mlir::Type elementType;
+  if(typeA.isa<mlir::MemRefType>()) {
+    auto shapeA = typeA.dyn_cast<mlir::MemRefType>();
+    input_shapeA = shapeA.getShape();
+    elementType = shapeA.getElementType();
+  }
+  else {
+    llvm::errs() << "Type of left operand of" << operation << "is not Memref.\n";
+    return nullptr;
+  }
+  auto dtype = dtype_ != ""  ? dtype_ : toStr(elementType);
+
+  if(typeB.isa<mlir::MemRefType>()) {
+    auto shapeB = typeB.dyn_cast<mlir::MemRefType>();
+    input_shapeB = shapeB.getShape();
+  }
+  else {
+    llvm::errs() << "Type of right operand of " << operation << " is not Memref.\n";
+    return nullptr;
+  }
+
+  size_t max_dim, min_dim;
+  mlir::Value max_tensor, min_tensor;
+  std::vector<int> oneDimIndexs;
+  mlir::Value temp_tensor = nullptr;
+  std::vector<int64_t> max_shape, min_shape;
+  if (input_shapeA.size() > input_shapeB.size()) {  // A dim > B dim
+    max_tensor = A; min_tensor = B;
+    max_shape = std::vector<int64_t>(input_shapeA);
+    min_shape = std::vector<int64_t>(input_shapeB);
+  } else if (input_shapeA.size() < input_shapeB.size()) {  // B dim > A dim
+    max_tensor = B; min_tensor = A;
+    max_shape = std::vector<int64_t>(input_shapeB);
+    min_shape = std::vector<int64_t>(input_shapeA);
+  } else {   // A dim == B dim
+    for (int i=0; i<input_shapeA.size(); i++) {
+      if (input_shapeA[i] != input_shapeB[i]) {
+        if (input_shapeA[i] != 1 && input_shapeB[i] != 1) {
+          llvm::errs() << "A-dim is not equal to B-dim and Can't apply " << operation << " Operation due to imcompatible "<< i <<"-dim.\n";
+          return nullptr;
+        } else {
+          oneDimIndexs.push_back(i);
+          if (input_shapeA[i] == 1) {
+            if (temp_tensor && temp_tensor != A) {
+              llvm::errs() << "A-dim is not equal to B-dim and Can't apply " << operation << " Operation due to imcompatible "<< i <<"-dim.\n";
+              return nullptr;
+            } else temp_tensor = A;
+          } else {
+            if (temp_tensor && temp_tensor != B) {
+              llvm::errs() << "A-dim is not equal to B-dim and Can't apply " << operation << " Operation due to imcompatible "<< i <<"-dim.\n";
+              return nullptr;
+            } else temp_tensor = B;
+          }
+        }
+      }
+    }
+    if (temp_tensor) {
+      if (temp_tensor == A){
+        max_tensor = B; min_tensor = A;
+        max_shape = std::vector<int64_t>(input_shapeB);
+        min_shape = std::vector<int64_t>(input_shapeA);
+      } else {
+        max_tensor = A; min_tensor = B;
+        max_shape = std::vector<int64_t>(input_shapeA);
+        min_shape = std::vector<int64_t>(input_shapeB);
+      }
+    } else {
+      max_tensor = A; min_tensor = B;
+      max_shape = std::vector<int64_t>(input_shapeA);
+      min_shape = std::vector<int64_t>(input_shapeB);
+    }
+  }
+  max_dim = max_shape.size();
+  min_dim = min_shape.size();
+  if (max_dim != min_dim){
+    int mo = max_dim - min_dim;
+    for (int i=0; i<min_dim; i++) {
+      if (max_shape[i + mo] != min_shape[i]) {
+        if (min_shape[i] != 1) {
+          llvm::errs() << "A-dim is not equal to B-dim and Can't apply " << operation << " Operation due to imcompatible "<< i <<"-dim.\n";
+          return nullptr;          
+        } else
+          oneDimIndexs.push_back(i + mo);
+      }
+    }
+  }
+
+  auto funcName = std::string({operation + "_Binary"});
+
+  for (auto dim : max_shape) {
+    funcName += "_" + std::to_string(dim);
+  }
+  funcName += "_" + operation;
+
+  for (auto dim : min_shape) {
+    funcName += "_" + std::to_string(dim);
+  }
+
+  auto ip = builder.saveInsertionPoint();
+  auto funcOp = buildFuction(graph->module, builder, funcName, {max_tensor.getType(), min_tensor.getType()}, {max_tensor.getType()});
+  
+  auto& bodyBlock = funcOp.front();
+
+  if (bodyBlock.getOperations().size() > 0) {
+    auto callOp = builder.create<mlir::func::CallOp>(builder.getUnknownLoc(), funcOp, mlir::ValueRange({max_tensor, min_tensor}));
+    funcOp->setAttr(std::string("func.state"), builder.getStringAttr("cpu"));
+    return callOp.getResult(0);
+  } 
+
+  builder.setInsertionPointToStart(&bodyBlock);
+  mlir::ValueRange operands = bodyBlock.getArguments();  // 参数
+
+  auto emType = getDType(builder, dtype);
+
+  mlir::Value output;
+  if (ms != MemorySpace::inplace) {
+    auto typeC = mlir::MemRefType::get(max_shape, emType, {}, static_cast<int>(ms));
+    auto allocOp = builder.create<mlir::memref::AllocOp>(builder.getUnknownLoc(), typeC);
+    output = allocOp.getResult();
+  } else {
+    output = operands[0];
+  }
+
+  mlir::SmallVector<int64_t> lowerBounds(max_dim, /*Value=*/0);
+  mlir::SmallVector<int64_t> steps(max_dim, /*Value=*/1);
+  mlir::SmallVector<int64_t> upperBounds(max_shape.begin(), max_shape.end());
+  mlir::buildAffineLoopNest(builder, builder.getUnknownLoc(), lowerBounds, upperBounds, steps,
+    [&](mlir::OpBuilder &nestedBuilder, mlir::Location loc, mlir::ValueRange ivs) {
+      mlir::SmallVector<mlir::Value> min_ivs;
+      if (oneDimIndexs.size()) {
+        auto one = builder.create<mlir::arith::ConstantIndexOp>(builder.getUnknownLoc(), 0);
+        for (int i=max_dim-min_dim; i<ivs.size(); i++) {
+          if (std::find(oneDimIndexs.begin(), oneDimIndexs.end(), i) != oneDimIndexs.end())
+            min_ivs.push_back(one);
+          else 
+            min_ivs.push_back(ivs[i]);
+        }
+      } else {
+        min_ivs = mlir::SmallVector<mlir::Value>(ivs.take_back(min_dim));
+      }
+      auto ld_max = nestedBuilder.create<mlir::AffineLoadOp>(nestedBuilder.getUnknownLoc(), operands[0], mlir::ValueRange(ivs));
+      auto ld_min = nestedBuilder.create<mlir::AffineLoadOp>(nestedBuilder.getUnknownLoc(), operands[1], mlir::ValueRange(min_ivs));
+      auto result = operationMap[operation](nestedBuilder, ld_max, ld_min);
+      nestedBuilder.create<mlir::AffineStoreOp>(nestedBuilder.getUnknownLoc(), result, output, mlir::ValueRange(ivs));
+    }
+  );
+  builder.create<mlir::func::ReturnOp>(builder.getUnknownLoc(), output);
+  builder.restoreInsertionPoint(ip);
+  auto callOp = builder.create<mlir::func::CallOp>(builder.getUnknownLoc(), funcOp, mlir::ValueRange({max_tensor, min_tensor}));
+  funcOp->setAttr(std::string("func.state"), builder.getStringAttr("cpu"));
+  return callOp.getResult(0);
+}
+
+mlir::Value Binary::build(ComputeDAG* graph, mlir::Value A, float B, std::string operation, MemorySpace ms, const std::string& dtype_) {
+  auto builder = graph->builder;
+  auto typeA = A.getType();
+
+  llvm::ArrayRef<int64_t> input_shape;
+  mlir::Type elementType;
+  if(typeA.isa<mlir::MemRefType>()) {
+    auto shape = typeA.dyn_cast<mlir::MemRefType>();
+    input_shape = shape.getShape();
+    elementType = shape.getElementType();
+  }
+  else {
+    llvm::errs() << "Type of left operand of" << operation << "is not Memref.\n";
+    return nullptr;
+  }
+  auto dtype = dtype_ != ""  ? dtype_ : toStr(elementType);
+
+  auto funcName = std::string({operation + "_Binary"});
+
+  for (auto dim : input_shape) {
+    funcName += "_" + std::to_string(dim);
+  }
+  auto cst = std::to_string(B);
+  funcName += "_" + operation + "_cst_" + cst.substr(0, 1) + "_" + cst.substr(2);
+
+  auto ip = builder.saveInsertionPoint();
+  auto funcOp = buildFuction(graph->module, builder, funcName, {A.getType()}, {A.getType()});
+  
+  auto& bodyBlock = funcOp.front();
+
+  if (bodyBlock.getOperations().size() > 0) {
+    auto callOp = builder.create<mlir::func::CallOp>(builder.getUnknownLoc(), funcOp, mlir::ValueRange({A}));
+    funcOp->setAttr(std::string("func.state"), builder.getStringAttr("cpu"));
+    return callOp.getResult(0);
+  } 
+
+  builder.setInsertionPointToStart(&bodyBlock);
+  mlir::ValueRange operands = bodyBlock.getArguments();  // 参数
+
+  auto emType = getDType(builder, dtype);
+
+  mlir::Value output;
+  if (ms != MemorySpace::inplace) {
+    auto typeC = mlir::MemRefType::get(input_shape, emType, {}, static_cast<int>(ms));
+    auto allocOp = builder.create<mlir::memref::AllocOp>(builder.getUnknownLoc(), typeC);
+    output = allocOp.getResult();
+  } else {
+    output = operands[0];
+  }
+
+  mlir::SmallVector<int64_t> lowerBounds(input_shape.size(), /*Value=*/0);
+  mlir::SmallVector<int64_t> steps(input_shape.size(), /*Value=*/1);
+  mlir::SmallVector<int64_t> upperBounds(input_shape.begin(), input_shape.end());
+  mlir::buildAffineLoopNest(builder, builder.getUnknownLoc(), lowerBounds, upperBounds, steps,
+    [&](mlir::OpBuilder &nestedBuilder, mlir::Location loc, mlir::ValueRange ivs) {
+      auto ld_max = nestedBuilder.create<mlir::AffineLoadOp>(nestedBuilder.getUnknownLoc(), operands[0], mlir::ValueRange(ivs));
+      auto num = nestedBuilder.create<mlir::arith::ConstantOp>(nestedBuilder.getUnknownLoc(), nestedBuilder.getFloatAttr(getDType(nestedBuilder, dtype), B));
+      auto result = operationMap[operation](nestedBuilder, ld_max, num);
+      nestedBuilder.create<mlir::AffineStoreOp>(nestedBuilder.getUnknownLoc(), result, output, mlir::ValueRange(ivs));
+    }
+  );
+  builder.create<mlir::func::ReturnOp>(builder.getUnknownLoc(), output);
+  builder.restoreInsertionPoint(ip);
+  auto callOp = builder.create<mlir::func::CallOp>(builder.getUnknownLoc(), funcOp, mlir::ValueRange({A}));
+  funcOp->setAttr(std::string("func.state"), builder.getStringAttr("cpu"));
+  return callOp.getResult(0);
+}
+
+/*------------------------------------ElementWise--------------------------------------*/
+mlir::Value ElementWise::tanh(mlir::OpBuilder &builder, mlir::Value elem, mlir::Type type) {
+  return builder.create<mlir::math::TanhOp>(builder.getUnknownLoc(), elem);
+}
+
+mlir::Value ElementWise::sqrt(mlir::OpBuilder &builder, mlir::Value elem, mlir::Type type) {
+  return builder.create<mlir::math::SqrtOp>(builder.getUnknownLoc(), elem);
+}
+
+mlir::Value ElementWise::log(mlir::OpBuilder &builder, mlir::Value elem, mlir::Type type) {
+  return builder.create<mlir::math::LogOp>(builder.getUnknownLoc(), elem);
+}
+
+mlir::Value ElementWise::relu(mlir::OpBuilder &builder, mlir::Value elem, mlir::Type type) {
+  auto zero = builder.create<mlir::arith::ConstantOp>(builder.getUnknownLoc(), builder.getFloatAttr(type, 0));
+  return builder.create<mlir::arith::MaxFOp>(builder.getUnknownLoc(), zero, elem);
+}
+
+mlir::Value ElementWise::cast(mlir::OpBuilder &builder, mlir::Value elem, mlir::Type type) {
+  return builder.create<mlir::arith::BitcastOp>(builder.getUnknownLoc(), type, elem);
+}
+
+mlir::Value ElementWise::gelu(mlir::OpBuilder &builder, mlir::Value elem, mlir::Type type) {
+  auto one = builder.create<mlir::arith::ConstantOp>(builder.getUnknownLoc(), builder.getFloatAttr(type, 1.0));
+  auto dotFive = builder.create<mlir::arith::ConstantOp>(builder.getUnknownLoc(), builder.getFloatAttr(type, 0.5));
+  auto sqrtHaftPi = builder.create<mlir::arith::ConstantOp>(builder.getUnknownLoc(), builder.getFloatAttr(type, 0.797884));
+  auto cst = builder.create<mlir::arith::ConstantOp>(builder.getUnknownLoc(), builder.getFloatAttr(type, 0.044715));
+  auto temp1 = builder.create<mlir::arith::MulFOp>(builder.getUnknownLoc(), elem, dotFive);
+  auto temp2 = builder.create<mlir::arith::MulFOp>(builder.getUnknownLoc(), elem, elem);
+  auto temp3 = builder.create<mlir::arith::MulFOp>(builder.getUnknownLoc(), elem, temp2);
+  auto temp4 = builder.create<mlir::arith::MulFOp>(builder.getUnknownLoc(), cst, temp3);
+  auto temp5 = builder.create<mlir::arith::AddFOp>(builder.getUnknownLoc(), temp4, elem);
+  auto temp6 = builder.create<mlir::arith::MulFOp>(builder.getUnknownLoc(), sqrtHaftPi, temp5);
+  auto temp7 = builder.create<mlir::math::TanhOp>(builder.getUnknownLoc(), temp6);
+  auto temp8 = builder.create<mlir::arith::AddFOp>(builder.getUnknownLoc(), temp7, one);
+  return builder.create<mlir::arith::MulFOp>(builder.getUnknownLoc(), temp1, temp8);
+}
+
+std::map<std::string, std::function<mlir::Value(mlir::OpBuilder&, mlir::Value, mlir::Type)>> ElementWise::operationMap = {
+    {"tanh", &ElementWise::tanh}, {"sqrt", &ElementWise::sqrt}, {"log", &ElementWise::log},
+    {"relu", &ElementWise::relu}, {"cast", &ElementWise::cast}, {"gelu", &ElementWise::gelu}
+};
+/*-------------------------------------------------------------------------------------*/
+
+mlir::Value ElementWise::build(ComputeDAG* graph, mlir::Value input, std::string operation, MemorySpace ms, const std::string& dtype_) {
+  auto builder = graph->builder;
+  auto type_input = input.getType();
+
+  mlir::Type elementType;
+  llvm::ArrayRef<int64_t> input_shape;
+
+  if(type_input.isa<mlir::MemRefType>()) {
+    auto shape = type_input.dyn_cast<mlir::MemRefType>();
+    input_shape = shape.getShape();
+    elementType = shape.getElementType();
+  }
+  else {
+    llvm::errs() << "Type of operand of " << operation << " is not Memref.\n";
+    return nullptr;
+  }
+  auto dtype = dtype_ != ""  ? dtype_ : toStr(elementType);
+
+  auto funcName = std::string({operation + "_Elementwise"});
+
+  for (auto dim : input_shape) {
+    funcName += "_" + std::to_string(dim);
+  }
+
+  auto ip = builder.saveInsertionPoint();
+  mlir::func::FuncOp funcOp;
+  if (ms != MemorySpace::inplace) {
+    auto emType = getDType(builder, dtype);
+    auto typeC = mlir::MemRefType::get(input_shape, emType, {}, static_cast<int>(ms));
+    funcOp = buildFuction(graph->module, builder, funcName, {input.getType()}, {typeC});
+  } else {
+    funcOp = buildFuction(graph->module, builder, funcName, {input.getType()}, {input.getType()});
+  }
+  
+  auto& bodyBlock = funcOp.front();
+
+  if (bodyBlock.getOperations().size() > 0) {
+    auto callOp = builder.create<mlir::func::CallOp>(builder.getUnknownLoc(), funcOp, mlir::ValueRange({input}));
+    funcOp->setAttr(std::string("func.state"), builder.getStringAttr("cpu"));
+    return callOp.getResult(0);
+  } 
+
+  builder.setInsertionPointToStart(&bodyBlock);
+  mlir::ValueRange operands = bodyBlock.getArguments();  // 参数
+
+  mlir::Value output;
+  if (ms != MemorySpace::inplace) {
+    auto emType = getDType(builder, dtype);
+    auto typeC = mlir::MemRefType::get(input_shape, emType, {}, static_cast<int>(ms));
+    auto allocOp = builder.create<mlir::memref::AllocOp>(builder.getUnknownLoc(), typeC);
+    output = allocOp.getResult();
+  } else {
+    output = operands[0];
+  }
+
+  mlir::SmallVector<int64_t> lowerBounds(input_shape.size(), /*Value=*/0);
+  mlir::SmallVector<int64_t> steps(input_shape.size(), /*Value=*/1);
+  mlir::SmallVector<int64_t> upperBounds(input_shape.begin(), input_shape.end());
+  mlir::buildAffineLoopNest(builder, builder.getUnknownLoc(), lowerBounds, upperBounds, steps,
+    [&](mlir::OpBuilder &nestedBuilder, mlir::Location loc, mlir::ValueRange ivs) {
+      auto ld_elem = nestedBuilder.create<mlir::AffineLoadOp>(nestedBuilder.getUnknownLoc(), operands[0], mlir::ValueRange(ivs));
+      auto result = operationMap[operation](nestedBuilder, ld_elem, getDType(builder, dtype));
+      nestedBuilder.create<mlir::AffineStoreOp>(nestedBuilder.getUnknownLoc(), result, output, mlir::ValueRange(ivs));
+    }
+  );
+  builder.create<mlir::func::ReturnOp>(builder.getUnknownLoc(), output);
+
+  builder.restoreInsertionPoint(ip);
+  auto callOp = builder.create<mlir::func::CallOp>(builder.getUnknownLoc(), funcOp, mlir::ValueRange({input}));
+  funcOp->setAttr(std::string("func.state"), builder.getStringAttr("cpu"));
+  return callOp.getResult(0);
+}
+
+mlir::Value LayerNorm::build(ComputeDAG* graph, mlir::Value input, std::vector<int64_t>& axes, MemorySpace ms, const float &eps, const std::string& dtype_) {
+  auto builder = graph->builder;
+  auto type_input = input.getType();
+
+  llvm::ArrayRef<int64_t> input_shape;
+  mlir::Type elementType;
+  if(type_input.isa<mlir::MemRefType>()) {
+    auto shape = type_input.dyn_cast<mlir::MemRefType>();
+    input_shape = shape.getShape();
+    elementType = shape.getElementType();
+  } else {
+    llvm::errs() << "Type of operand of LayerNorm is not Memref.\n";
+    return nullptr;
+  }
+  auto dtype = dtype_ != ""  ? dtype_ : toStr(elementType);
+
+  for (int i=0; i<axes.size(); i++)   // 负数情况
+    if (axes[i] < 0) 
+      axes[i] += input_shape.size();
+
+  for (int i=0; i<axes.size(); i++) {
+    if (axes[i] >= input_shape.size()) {  // 指定维度超出范围
+      llvm::errs() << "axis "<< i <<" is out of bounds for array of dimension "<< input_shape.size() <<".\n";
+      return nullptr;
+    }
+    for (int j=i+1; j<axes.size(); j++)  // 指定维度重复
+      if (axes[i] == axes[j]){
+        llvm::errs() << "duplicate value in 'axis'.\n";
+        return nullptr;
+      }
+  }
+
+  auto isInner = [&](const std::vector<int64_t>& data, int item) {
+    for (auto i: data) {
+        if (i == item) return true;
+    }
+    return false;
+  };
+  // 不需要考虑axis == {}的情况了，与axis == {4, 3, 2}一样处理。
+  std::vector<int64_t> in_dim;
+  if (axes.size() == 0) {
+    for (int i=0; i<input_shape.size(); i++)  {in_dim.push_back(i);}
+  } else {
+    in_dim = axes;
+    std::sort(in_dim.begin(), in_dim.end());
+  }
+
+  // 定义内外循环变量
+  size_t elemNum= 1;
+  std::vector<int64_t> out_dim, in_shape, out_shape;
+  for (int i=0; i<input_shape.size(); i++) {
+    if (isInner(in_dim, i)) {
+      elemNum *= input_shape[i];
+      in_shape.push_back(input_shape[i]);
+    } else {
+      out_dim.push_back(i);
+      out_shape.push_back(input_shape[i]);
+    }
+  }
+
+  auto getIndexArgs = [&](mlir::ValueRange inIvs, mlir::ValueRange outIvs) {
+    mlir::SmallVector<mlir::Value> ivs;
+    int out = 0, in = 0;
+    for (int i=0; i<input_shape.size(); i++) {
+      if (isInner(out_dim, i)) { ivs.push_back(outIvs[out++]); } 
+      else { ivs.push_back(inIvs[in++]); }
+    }
+    return ivs;
+  };
+
+  auto funcName = std::string({"LayerNorm"});
+  for (auto dim : input_shape) {
+    funcName += "_" + std::to_string(dim);
+  }
+  funcName += "_axes";
+  for (auto axis : axes) {
+    funcName += "_" + std::to_string(axis);
+  }
+
+  auto ip = builder.saveInsertionPoint();
+  auto funcOp = buildFuction(graph->module, builder, funcName, {input.getType()}, {input.getType()});
+  
+  auto& bodyBlock = funcOp.front();
+
+  if (bodyBlock.getOperations().size() > 0) {
+    auto callOp = builder.create<mlir::func::CallOp>(builder.getUnknownLoc(), funcOp, mlir::ValueRange({input}));
+    funcOp->setAttr(std::string("func.state"), builder.getStringAttr("cpu"));
+    return callOp.getResult(0);
+  } 
+
+  builder.setInsertionPointToStart(&bodyBlock);
+  mlir::ValueRange operands = bodyBlock.getArguments();  // 参数
+  auto emType = getDType(builder, dtype);
+  mlir::Value output;
+  if (ms != MemorySpace::inplace) {
+    auto typeC = mlir::MemRefType::get(input_shape, emType, {}, static_cast<int>(ms));
+    auto allocOp = builder.create<mlir::memref::AllocOp>(builder.getUnknownLoc(), typeC);
+    output = allocOp.getResult();
+  } else {
+    output = operands[0];
+  }
+
+  mlir::SmallVector<int64_t> outLowerBounds(out_dim.size(), /*Value=*/0);
+  mlir::SmallVector<int64_t> outSteps(out_dim.size(), /*Value=*/1);
+  mlir::SmallVector<int64_t> outUpperBounds(out_shape.begin(), out_shape.end());
+  mlir::buildAffineLoopNest(builder, builder.getUnknownLoc(), outLowerBounds, outUpperBounds, outSteps,
+    [&](mlir::OpBuilder &outNestedBuilder, mlir::Location outLoc, mlir::ValueRange outIvs) {
+      auto reduceNum = builder.create<mlir::arith::ConstantOp>(builder.getUnknownLoc(), builder.getFloatAttr(emType, elemNum));
+      auto epsNum = builder.create<mlir::arith::ConstantOp>(builder.getUnknownLoc(), builder.getFloatAttr(emType, eps));
+      auto iter = outNestedBuilder.create<mlir::arith::ConstantOp>(outLoc, outNestedBuilder.getFloatAttr(getDType(builder, dtype), 0));
+
+      mlir::SmallVector<int64_t> inLowerBounds(in_dim.size(), /*Value=*/0);
+      mlir::SmallVector<int64_t> inSteps(in_dim.size(), /*Value=*/1);
+      mlir::SmallVector<int64_t> inUpperBounds(in_shape.begin(), in_shape.end());
+
+      auto loop1 = buildAffineLoopNest_(outNestedBuilder, outLoc, inLowerBounds, inUpperBounds, inSteps, mlir::ValueRange({iter}), 
+      [&](mlir::OpBuilder& inNestedBuilder, mlir::Location inLoc, mlir::ValueRange inIvs, mlir::ValueRange iterArgs) {
+        auto ivs = getIndexArgs(inIvs, outIvs);
+        auto ld = inNestedBuilder.create<mlir::AffineLoadOp>(inNestedBuilder.getUnknownLoc(), operands[0], mlir::ValueRange(ivs));
+        return inNestedBuilder.create<mlir::arith::AddFOp>(inNestedBuilder.getUnknownLoc(), ld, iterArgs[0]);
+      });
+      auto div1 = outNestedBuilder.create<mlir::arith::DivFOp>(outNestedBuilder.getUnknownLoc(), loop1.getResult(0), reduceNum);
+
+      auto loop2 = buildAffineLoopNest_(outNestedBuilder, outLoc, inLowerBounds, inUpperBounds, inSteps, mlir::ValueRange({iter}), 
+      [&](mlir::OpBuilder& inNestedBuilder, mlir::Location inLoc, mlir::ValueRange inIvs, mlir::ValueRange iterArgs) {
+        auto ivs = getIndexArgs(inIvs, outIvs);
+        auto ld = inNestedBuilder.create<mlir::AffineLoadOp>(inNestedBuilder.getUnknownLoc(), operands[0], mlir::ValueRange(ivs));
+        auto subOp = inNestedBuilder.create<mlir::arith::SubFOp>(inNestedBuilder.getUnknownLoc(), ld, div1);
+        inNestedBuilder.create<mlir::AffineStoreOp>(inNestedBuilder.getUnknownLoc(), subOp, output, mlir::ValueRange(ivs));
+        auto mulOp = inNestedBuilder.create<mlir::arith::MulFOp>(inNestedBuilder.getUnknownLoc(), subOp, subOp);
+        return inNestedBuilder.create<mlir::arith::AddFOp>(inNestedBuilder.getUnknownLoc(), mulOp, iterArgs[0]);
+      });
+      auto div2 = outNestedBuilder.create<mlir::arith::DivFOp>(outNestedBuilder.getUnknownLoc(), loop2.getResult(0), reduceNum);
+      auto addOp = outNestedBuilder.create<mlir::arith::AddFOp>(outNestedBuilder.getUnknownLoc(), div2, epsNum);
+      auto sqrtOp = outNestedBuilder.create<mlir::math::SqrtOp>(outNestedBuilder.getUnknownLoc(), addOp);
+      
+      mlir::buildAffineLoopNest(outNestedBuilder, outLoc, inLowerBounds, inUpperBounds, inSteps,
+      [&](mlir::OpBuilder &inNestedBuilder, mlir::Location inLoc, mlir::ValueRange inIvs) {
+        auto ivs = getIndexArgs(inIvs, outIvs);
+        auto ld = inNestedBuilder.create<mlir::AffineLoadOp>(inNestedBuilder.getUnknownLoc(), operands[0], mlir::ValueRange(ivs));
+        auto div = inNestedBuilder.create<mlir::arith::DivFOp>(inNestedBuilder.getUnknownLoc(), ld, sqrtOp);
+        inNestedBuilder.create<mlir::AffineStoreOp>(inNestedBuilder.getUnknownLoc(), div, output, mlir::ValueRange(ivs));
+      });
+      
+  });
+  builder.create<mlir::func::ReturnOp>(builder.getUnknownLoc(), output);
+
   builder.restoreInsertionPoint(ip);
   auto callOp = builder.create<mlir::func::CallOp>(builder.getUnknownLoc(), funcOp, mlir::ValueRange({input}));
   funcOp->setAttr(std::string("func.state"), builder.getStringAttr("cpu"));

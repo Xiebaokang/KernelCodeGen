@@ -1,7 +1,7 @@
 # preconfig
 ###################################################################
 # set nvcc path
-set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.1/bin/nvcc)
+set(CMAKE_CUDA_COMPILER /usr/local/cuda-11.1/bin/nvcc)
 
 # set to debug mode
 # set(CMAKE_BUILD_TYPE Release)
@@ -10,18 +10,18 @@ set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.1/bin/nvcc)
 # project config
 ###################################################################
 cmake_minimum_required(VERSION 3.20.0)
-project(KernelCodeGen LANGUAGES CXX C CUDA)
+project(KernelCodeGen LANGUAGES CXX C)    # delete CUDA
 
 set(CMAKE_BUILD_WITH_INSTALL_NAME_DIR ON)
 
 set(CMAKE_CXX_STANDARD 17 CACHE STRING "C++ standard to conform to")
 
 message(STATUS "LLVM_BUILD_LIBRARY_DIR ${LLVM_BUILD_LIBRARY_DIR}")
-set(LLVM_BUILD_LIBRARY_DIR /Workspace/llvm-project/build/lib)
+set(LLVM_BUILD_LIBRARY_DIR /home/xiebaokang/projects/mlir/llvm-project/build/lib)
 message(STATUS "LLVM_BUILD_LIBRARY_DIR ${LLVM_BUILD_LIBRARY_DIR}")
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-  find_package(MLIR REQUIRED CONFIG)
+  find_package(MLIR REQUIRED CONFIG PATHS ./cmake)
 
   message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
   message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")

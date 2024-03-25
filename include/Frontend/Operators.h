@@ -101,4 +101,32 @@ struct Transpose : Operator<Transpose> {
   static mlir::Value build(ComputeDAG* graph, mlir::Value input);
 };
 
+struct Binary : Operator<Binary> {
+  static mlir::Value build(ComputeDAG* graph, mlir::Value A, mlir::Value B, std::string operation, MemorySpace ms, const std::string& dtype = {""});
+  static mlir::Value build(ComputeDAG* graph, mlir::Value A, float B, std::string operation, MemorySpace ms, const std::string& dtype = {""});
+  static mlir::Value add(mlir::OpBuilder &builder, mlir::Value elem_1, mlir::Value elem_2);
+  static mlir::Value mul(mlir::OpBuilder &builder, mlir::Value elem_1, mlir::Value elem_2);
+  static mlir::Value div(mlir::OpBuilder &builder, mlir::Value elem_1, mlir::Value elem_2);
+  static mlir::Value sub(mlir::OpBuilder &builder, mlir::Value elem_1, mlir::Value elem_2);
+  static mlir::Value pow(mlir::OpBuilder &builder, mlir::Value elem_1, mlir::Value elem_2);
+  static mlir::Value equal(mlir::OpBuilder &builder, mlir::Value elem_1, mlir::Value elem_2);
+  static mlir::Value greater(mlir::OpBuilder &builder, mlir::Value elem_1, mlir::Value elem_2);
+  static std::map<std::string, std::function<mlir::Value(mlir::OpBuilder&, mlir::Value, mlir::Value)>> operationMap;
+};
+
+struct ElementWise : Operator<ElementWise> {
+  static mlir::Value build(ComputeDAG* graph, mlir::Value input, std::string operation, MemorySpace ms, const std::string& dtype = {""});
+  static mlir::Value tanh(mlir::OpBuilder &builder, mlir::Value elem, mlir::Type type);
+  static mlir::Value sqrt(mlir::OpBuilder &builder, mlir::Value elem, mlir::Type type);
+  static mlir::Value log(mlir::OpBuilder &builder, mlir::Value elem, mlir::Type type);
+  static mlir::Value relu(mlir::OpBuilder &builder, mlir::Value elem, mlir::Type type);
+  static mlir::Value cast(mlir::OpBuilder &builder, mlir::Value elem, mlir::Type type);
+  static mlir::Value gelu(mlir::OpBuilder &builder, mlir::Value elem, mlir::Type type);
+  static std::map<std::string, std::function<mlir::Value(mlir::OpBuilder&, mlir::Value, mlir::Type)>> operationMap;
+};
+
+struct LayerNorm : Operator<LayerNorm> {
+  static mlir::Value build(ComputeDAG* graph, mlir::Value input, std::vector<int64_t>& axes, MemorySpace ms, const float &eps= 1e-5, const std::string& dtype_ = {""});
+};
+
 }

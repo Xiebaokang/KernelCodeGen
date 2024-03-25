@@ -30,10 +30,22 @@ public:
     platform(std::move(platform_)) {
     initMLIRContext();
     // opts.push_back(std::move(std::make_unique<MatmulOptimizer>()));
+    opts.push_back(std::move(std::make_unique<BinaryOptimizer>()));
+    opts.push_back(std::move(std::make_unique<ElementWiseOptimizer>()));
+    opts.push_back(std::move(std::make_unique<LayerNormOptimizer>()));
     opts.push_back(std::move(std::make_unique<FMHAOptimizer>()));
     matmulConfigs = {
       { {"BLOCK_SIZE_M", 128}, {"BLOCK_SIZE_N", 128}, {"BLOCK_SIZE_K", 8}, {"GROUP_SIZE_M", 8}, 
         {"THREAD_SIZE_M", 8}, {"THREAD_SIZE_N", 8}, {"VECTORIZE_WIDTH", 4}, {"WARP_SIZE", 32}}
+    };
+    binaryConfigs = {
+      {{"BLOCK_SIZE_M", 64}, {"BLOCK_SIZE_N", 64}, {"THREAD_SIZE_M", 4}, {"THREAD_SIZE_N", 4}, {"VECTORIZE_WIDTH", 4}}
+    };
+    elementWiseConfigs = {
+      {{"BLOCK_SIZE_M", 64}, {"BLOCK_SIZE_N", 64}, {"THREAD_SIZE_M", 4}, {"THREAD_SIZE_N", 4}, {"VECTORIZE_WIDTH", 4}}
+    };
+    layerNormConfigs = {
+      {{"BLOCK_SIZE", 2048}, {"THREAD_SIZE", 4}, {"VECTORIZE_WIDTH", 4}}
     };
     fmhaConfigs = {
       {{"BLOCK_SIZE", 128}, {"HdxBr", 128 * 64}, {"BrxBc", 128 * 64}, {"WarpX_O", 2}, {"Slice", 8},
@@ -141,6 +153,9 @@ private:
   std::vector<std::unique_ptr<Optimizer>> opts;
   std::vector<std::map<std::string, int>> matmulConfigs;
   std::vector<std::map<std::string, int>> fmhaConfigs;
+  std::vector<std::map<std::string, int>> binaryConfigs;
+  std::vector<std::map<std::string, int>> elementWiseConfigs;
+  std::vector<std::map<std::string, int>> layerNormConfigs;
 };
 
 }
