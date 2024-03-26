@@ -7,7 +7,21 @@
   if (KCGLog::level == Log::Debug) {    \
     module.dump();                      \
   }                                     \
-}                                       
+}
+
+inline std::string toStr(mlir::Type type) {
+  if(type.isa<mlir::Float16Type>()) return {"float16"};
+  if(type.isa<mlir::Float32Type>()) return {"float32"};
+  if(type.isa<mlir::Float64Type>()) return {"float64"};
+  if(auto int_type = type.dyn_cast<mlir::IntegerType>()) {
+    if (int_type.getWidth() == 1) return {"bool"};
+    else if (int_type.getWidth() == 8) return {"int"};
+    else if (int_type.getWidth() == 32) return {"int32_t"};
+    else if (int_type.getWidth() == 64) return {"int64_t"};
+  }
+  if(type.isa<mlir::IndexType>()) return {"index"};
+  return nullptr;
+}
 
 namespace KernelCodeGen {
 
@@ -1224,10 +1238,20 @@ void LayerNormOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& 
     Rewriter::changeMemoryToShared(blockLevel2->getPrevNode(), iterBuffer1);
     Rewriter::changeMemoryToShared(blockLevel3->getPrevNode(), iterBuffer2);
     Rewriter::combineParallel({blockLevel1, blockLevel2, blockLevel3});
-    Rewriter::barrier(split_loops1[0], Position::after);
-    Rewriter::barrier(split_loops2[0], Position::after);
-    Rewriter::barrier(split_loops1[0], Position::before);
-    Rewriter::barrier(split_loops3[0], Position::before);
+    auto yieldBar1 = Rewriter::barrier(split_loops1[0], Position::end);
+    Rewriter::schedule(yieldBar1, yieldBar1->getPrevNode(), Position::before);
+
+    auto ifBar1 = Rewriter::barrier(split_loops1[0], Position::after);
+    Rewriter::schedule(ifBar1, ifBar1->getNextNode(), Position::after);
+
+    auto yieldBar2 = Rewriter::barrier(split_loops2[0], Position::end);
+    Rewriter::schedule(yieldBar2, yieldBar2->getPrevNode(), Position::before);
+
+    auto ifBar2 = Rewriter::barrier(split_loops2[0], Position::after);
+    Rewriter::schedule(ifBar2, ifBar2->getNextNode(), Position::after);
+
+    auto yieldBar3 = Rewriter::barrier(split_loops3[0], Position::end);
+    Rewriter::schedule(yieldBar3, yieldBar3->getPrevNode(), Position::before);
     DUMP(module);
 
     auto blockIdx = Rewriter::getParallelIdx(gridLevel);

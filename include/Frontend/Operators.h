@@ -6,6 +6,8 @@
 
 namespace KernelCodeGen {
 
+using loopfunc = std::function<mlir::Value(mlir::OpBuilder&, mlir::Location, mlir::ValueRange, mlir::ValueRange)>;
+
 mlir::func::FuncOp buildFuction(mlir::ModuleOp module, mlir::OpBuilder& builder, 
  const std::string& funcName, const std::vector<mlir::Type>& inputsTypes, 
  const std::vector<mlir::Type>& outputsTypes);
