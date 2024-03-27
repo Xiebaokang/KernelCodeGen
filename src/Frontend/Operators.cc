@@ -27,9 +27,8 @@ std::string toStr(mlir::Type type) {
   return nullptr;
 }
 
-mlir::AffineForOp buildAffineLoopNest_(
-  mlir::OpBuilder &builder, mlir::Location loc, llvm::ArrayRef<int64_t> lbs, llvm::ArrayRef<int64_t> ubs, llvm::ArrayRef<int64_t> steps, 
-   mlir::ValueRange iterArgs, loopfunc bodyBuilderFn) {
+mlir::AffineForOp buildAffineLoopNest_(mlir::OpBuilder &builder, mlir::Location loc, llvm::ArrayRef<int64_t> lbs, llvm::ArrayRef<int64_t> ubs, 
+                                        llvm::ArrayRef<int64_t> steps, mlir::ValueRange iterArgs, loopfunc bodyBuilderFn) {
 
   assert(lbs.size() == ubs.size() && "Mismatch in number of arguments");
   assert(lbs.size() == steps.size() && "Mismatch in number of arguments");

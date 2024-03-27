@@ -1968,26 +1968,6 @@ mlir::AffineIfOp Rewriter::irregularMat(mlir::AffineForOp forOp, std::vector<int
   forOp.erase();
 }
 
-// mlir::AffineLoadOp Rewriter::convertLoadop(mlir::AffineForOp forOp) {
-//   std::vector<mlir::memref::LoadOp> memLoadOps;
-//   forOp.walk<mlir::WalkOrder::PreOrder>([&](mlir::memref::LoadOp memLoadOp) {
-//     memLoadOps.push_back(memLoadOp);
-//   });
-
-//   mlir::OpBuilder builder(forOp.getOperation());
-
-//   for (auto memLoadOp : memLoadOps) {
-//     auto ops = memLoadOp.getOperands();
-//     for (auto op : ops) {
-//       llvm::outs() << op << "\n";
-//     }
-    
-//     auto loadop = builder.create<mlir::AffineLoadOp>(builder.getUnknownLoc(), memLoadOp.getMemref(), memLoadOp.indices());
-//     memLoadOp.getResult().replaceAllUsesWith(loadop.getResult());
-//     memLoadOp.erase();
-//   }
-// }
-
 mlir::AffineForOp Rewriter::combineToOneDim(std::vector<mlir::AffineForOp> loops) {
   std::vector<int64_t> originUps;
   std::vector<mlir::BlockArgument> oldIvs;

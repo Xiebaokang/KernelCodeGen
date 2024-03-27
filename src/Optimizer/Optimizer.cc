@@ -398,7 +398,6 @@ mlir::AffineMap MatmulOptimizer::getAffineMap(const std::string& mapIdentifier, 
 }
 
 void MatmulOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& builder) {
-
   for (auto& matmul : matmuls) {
     matmul->setAttr(std::string("func.state"), builder.getStringAttr("gpu"));
     auto loops = matmulLoops[matmul];
