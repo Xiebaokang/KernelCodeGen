@@ -247,11 +247,11 @@ struct Rewriter {
   static std::vector<mlir::AffineForOp> combineToTowDim(std::vector<mlir::AffineForOp> loops);
 
 
-  static mlir::AffineForOp noVcetorRead(mlir::Value src, mlir::Value dst, mlir::AffineMap map, 
+  static mlir::AffineForOp read(mlir::Value src, mlir::Value dst, mlir::AffineMap map, 
                                   llvm::SmallVector<mlir::Value> operands, mlir::AffineForOp compute_at, Position pos);
 
 
-  static mlir::AffineForOp noVcetorWrite(mlir::Value src, mlir::Value dst, mlir::AffineMap map, 
+  static mlir::AffineForOp write(mlir::Value src, mlir::Value dst, mlir::AffineMap map, 
                                   llvm::SmallVector<mlir::Value> operands, mlir::AffineForOp compute_at, Position pos);
 
   static mlir::AffineIfOp irregularMat(mlir::AffineForOp forOp, std::vector<int> range, llvm::SmallVector<mlir::Value> operands);
@@ -260,14 +260,12 @@ struct Rewriter {
 
   static mlir::Value bufferizeLoopCarryVar(mlir::AffineForOp &loop, mlir::Block* buildBlock);
 
-  static mlir::AffineForOp read(mlir::Value src, mlir::Value dst, std::vector<mlir::AffineMap> maps, llvm::SmallVector<mlir::Value> operands, 
-                                std::vector<int64_t> widths, mlir::AffineForOp compute_at, Position pos);
-
   static void swapLoops(std::vector<std::vector<mlir::AffineForOp>> loops);
 
   static void changeMemoryToShared(mlir::Operation* resultOp, mlir::Value buffer);
-
-  static mlir::AffineParallelOp combineParallel(std::vector<mlir::AffineParallelOp> pals);
+  
+  static void scheduleOpGridToBlock(mlir::AffineParallelOp gridLevel, mlir::AffineParallelOp blockLevel);
+  
 };
 
 }

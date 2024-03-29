@@ -1262,7 +1262,6 @@ void replaceOperands(mlir::Operation* op, mlir::Value src, mlir::Value dst) {
       }
     }
   }
-
 }
 
 void Rewriter::extract_loop(mlir::Operation* srcOp, mlir::AffineForOp forOp, int64_t iteration) {
@@ -1886,7 +1885,7 @@ std::vector<mlir::AffineForOp> Rewriter::combineToTowDim(std::vector<mlir::Affin
 }
 
 // dst is register.
-mlir::AffineForOp Rewriter::noVcetorRead(mlir::Value src, mlir::Value dst, mlir::AffineMap map, 
+mlir::AffineForOp Rewriter::read(mlir::Value src, mlir::Value dst, mlir::AffineMap map, 
                                           llvm::SmallVector<mlir::Value> operands, mlir::AffineForOp compute_at, Position pos) {
   auto builder = getBuilder(compute_at, pos);
   auto dstType = dst.getType().dyn_cast<mlir::MemRefType>();  // dst为memref对象的getresult值，也就是对
@@ -1904,7 +1903,7 @@ mlir::AffineForOp Rewriter::noVcetorRead(mlir::Value src, mlir::Value dst, mlir:
 }
 
 // src is register
-mlir::AffineForOp Rewriter::noVcetorWrite(mlir::Value src, mlir::Value dst, mlir::AffineMap map, 
+mlir::AffineForOp Rewriter::write(mlir::Value src, mlir::Value dst, mlir::AffineMap map, 
                                           llvm::SmallVector<mlir::Value> operands, mlir::AffineForOp compute_at, Position pos) {
   auto builder = getBuilder(compute_at, pos);
   auto dstType = src.getType().dyn_cast<mlir::MemRefType>();  // dst为memref对象的getresult值，也就是对
@@ -2120,25 +2119,6 @@ mlir::Value Rewriter::bufferizeLoopCarryVar(mlir::AffineForOp &loop, mlir::Block
   return allocOp.getResult();
 }
 
-mlir::AffineForOp Rewriter::read(mlir::Value src, mlir::Value dst, std::vector<mlir::AffineMap> maps, llvm::SmallVector<mlir::Value> operands,
-                                  std::vector<int64_t> widths, mlir::AffineForOp compute_at, Position pos) {
-  auto builder = getBuilder(compute_at, pos);
-  auto dstType = dst.getType().dyn_cast<mlir::MemRefType>();
-  // registers is always 1 dim.
-  auto loadTimes = widths[0] / widths[1];
-  auto loadBody = [&](mlir::OpBuilder &builder, mlir::Location nestedLoc, mlir::Value iv, mlir::ValueRange iterArgs) {
-    mlir::OpBuilder::InsertionGuard nestedGuard(builder);
-    // loop iterator is the last operand.
-    operands.push_back(iv);
-    auto vectorType = mlir::VectorType::get(widths[1], dstType.getElementType());
-    auto ld = builder.create<mlir::AffineVectorLoadOp>(builder.getUnknownLoc(), vectorType, src, maps[0], operands);
-    auto st = builder.create<mlir::AffineVectorStoreOp>(builder.getUnknownLoc(), ld.getResult(), dst, maps[1], mlir::ValueRange({operands[2], iv}));
-    builder.create<mlir::AffineYieldOp>(builder.getUnknownLoc());
-  };
-  auto load = builder.create<mlir::AffineForOp>(builder.getUnknownLoc(), 0, loadTimes, 1, /*iterArgs=lvm::None*/ mlir::ValueRange({}), loadBody);
-  return load;
-}
-
 void Rewriter::swapLoops(std::vector<std::vector<mlir::AffineForOp>> loops) {
   for (auto twoLoop : loops) {
     swap(twoLoop[0], twoLoop[1]);
@@ -2187,64 +2167,22 @@ void Rewriter::changeMemoryToShared(mlir::Operation* resultOp, mlir::Value buffe
   }
 }
 
-mlir::AffineParallelOp Rewriter::combineParallel(std::vector<mlir::AffineParallelOp> pals) {
-  std::map<mlir::AffineParallelOp, std::vector<mlir::Operation*>> backOps; 
-  std::vector<mlir::AffineForOp> innerLoops;
-  
-  for (auto pal : pals) {
-    auto temp = pal->getNextNode();
-    while (temp) {
-      if (mlir::dyn_cast<mlir::AffineParallelOp>(temp)) break;
-      if (mlir::dyn_cast<mlir::func::ReturnOp>(temp)) break;
-      backOps[pal].push_back(temp);
-      temp = temp->getNextNode();
-    }
-    auto& loopOps = pal.getBody()->getOperations();
-    for (auto &op : loopOps) {
-      if (auto loop = mlir::dyn_cast<mlir::AffineForOp>(&op)){
-        innerLoops.push_back(loop);
-        break;
-      }
+void Rewriter::scheduleOpGridToBlock(mlir::AffineParallelOp gridLevel, mlir::AffineParallelOp blockLevel) {
+  std::vector<mlir::Operation*> needOps;
+  auto& ops = gridLevel.getBody()->getOperations();
+  for (auto& op : ops) {
+    if (auto cstIndex = mlir::dyn_cast<mlir::arith::ConstantIndexOp>(op)) {
+      needOps.push_back(cstIndex);
+    } else if (auto cstFloat = mlir::dyn_cast<mlir::arith::ConstantFloatOp>(op)) {
+      needOps.push_back(cstFloat);
     }
   }
-
-  std::vector<mlir::AffineIfOp> ifOps;
-  auto dim = mlir::getAffineDimExpr(0, pals[0].getContext());
-  auto set = mlir::IntegerSet::get(1, 0, llvm::ArrayRef<mlir::AffineExpr>({dim}), llvm::ArrayRef<bool>({true}));
-  auto palIdx = getParallelIdx(pals[0]);
-  std::reverse(innerLoops.begin(), innerLoops.end());
-  for (int i=0; i<innerLoops.size(); i++) {
-    innerLoops[i]->moveAfter(&(pals[0].getBody()->getOperations().front()));
-    if (i == 0 || i == 1) {
-      mlir::OpBuilder builder(innerLoops[i]);
-      
-      auto ifOp = builder.create<mlir::AffineIfOp>(builder.getUnknownLoc(), set, mlir::ValueRange(palIdx), false);
-      ifOps.push_back(ifOp);
-    }
+  auto applyOp = mlir::dyn_cast<mlir::AffineApplyOp>(blockLevel.getBody()->getOperations().front());
+  if (applyOp) {
+    for (auto op : needOps) { Rewriter::schedule(op, applyOp, Position::after); }
+  } else {
+    for (auto op : needOps) { Rewriter::schedule(op, blockLevel, Position::begin); }
   }
-
-  std::reverse(backOps[pals[0]].begin(), backOps[pals[0]].end());
-  for (auto op : backOps[pals[0]]) {
-    op->moveBefore(&(ifOps[1].getBody()->getOperations().front()));
-  }
-  std::reverse(backOps[pals[1]].begin(), backOps[pals[1]].end());
-  for (auto op : backOps[pals[1]]) {
-    op->moveBefore(&(ifOps[0].getBody()->getOperations().front()));
-  }
-
-  auto mainIdx = getElementIdx(pals[0]);   // applyop value
-  std::vector<mlir::AffineParallelOp> tempPals(pals.begin()+1, pals.end());
-  for (auto pal : tempPals) {
-    auto idx = getElementIdx(pal);
-    auto users = idx[0].getUsers();
-    for (auto user : users) {
-      idx[0].replaceAllUsesWith(mainIdx[0]);
-    }
-  }
-  pals[1].erase();
-  pals[2].erase();
 }
-
-
 
 }

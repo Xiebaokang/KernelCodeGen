@@ -567,6 +567,14 @@ void CUDAGenerator::codegen(mlir::AffineIfOp ifOp) {
     for (auto& op : ops) {
       if (auto forOp = mlir::dyn_cast<mlir::AffineForOp>(&op)) {
         this->codegen(forOp);
+      } else if (auto ifOp = mlir::dyn_cast<mlir::AffineIfOp>(&op)) {
+        this->codegen(ifOp);
+      } else if (auto constOp = mlir::dyn_cast<mlir::arith::ConstantIndexOp>(&op)) {
+        this->codegen(constOp);
+      } else if (auto constOp = mlir::dyn_cast<mlir::arith::ConstantFloatOp>(&op)) {
+        this->codegen(constOp);
+      } else if (auto intOp = mlir::dyn_cast<mlir::arith::ConstantIntOp>(&op)) {
+        this->codegen(intOp);
       } else if (auto vecLoad = mlir::dyn_cast<mlir::AffineVectorLoadOp>(&op)) {
         this->codegen(vecLoad);
       } else if (auto vecStore = mlir::dyn_cast<mlir::AffineVectorStoreOp>(&op)) {
@@ -585,8 +593,14 @@ void CUDAGenerator::codegen(mlir::AffineIfOp ifOp) {
         this->codegen(addOp);
       } else if (auto subOp = mlir::dyn_cast<mlir::arith::SubFOp>(&op)) {
         this->codegen(subOp);
+      } else if (auto divOp = mlir::dyn_cast<mlir::arith::DivFOp>(&op)) {
+        this->codegen(divOp);
+      } else if (auto sqrtOp = mlir::dyn_cast<mlir::math::SqrtOp>(&op)) {
+        this->codegen(sqrtOp);
       } else if (auto expOp = mlir::dyn_cast<mlir::math::ExpOp>(&op)) {
         this->codegen(expOp);
+      } else if (auto shflOp = mlir::dyn_cast<mlir::gpu::ShuffleOp>(&op)) {
+        this->codegen(shflOp);
       } else {
         auto yieldOp = mlir::dyn_cast<mlir::AffineYieldOp>(&op);
         assert(yieldOp);
@@ -908,6 +922,12 @@ void CUDAGenerator::codegen(mlir::AffineParallelOp node) {
     for (auto& op : ops) {
       if (auto allocOp = mlir::dyn_cast<mlir::memref::AllocOp>(&op)) {
         this->codegen(allocOp);
+      } else if (auto constOp = mlir::dyn_cast<mlir::arith::ConstantIndexOp>(&op)) {
+        this->codegen(constOp);
+      } else if (auto storeOp = mlir::dyn_cast<mlir::AffineStoreOp>(&op)) {
+        this->codegen(storeOp);
+      } else if (auto constOp = mlir::dyn_cast<mlir::arith::ConstantFloatOp>(&op)) {
+        this->codegen(constOp);
       } else if (auto applyOp = mlir::dyn_cast<mlir::AffineApplyOp>(&op)) {
         this->codegen(applyOp); 
       } else if (auto parallelOp = mlir::dyn_cast<mlir::AffineParallelOp>(&op)) {

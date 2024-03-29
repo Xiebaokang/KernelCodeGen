@@ -156,6 +156,12 @@ struct LayerNormOptimizer : Optimizer {
   virtual bool applicable(mlir::ModuleOp& module) override;
   virtual void applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& builder) override;
   mlir::AffineMap getAffineMap(const std::string& mapIdentifier, mlir::OpBuilder& builder, const std::vector<int64_t> &extras={});
+  mlir::AffineParallelOp combineParallel(std::vector<mlir::AffineParallelOp> pals);
+  std::vector<mlir::AffineForOp> fatchGlobalStoreOp(mlir::AffineForOp forOp, std::vector<mlir::Value> shareds);
+  std::vector<mlir::AffineForOp> fatchGlobalLoadOp(mlir::AffineForOp forOp, std::vector<mlir::Value> shareds);
+  std::vector<mlir::Operation*> optimizeReduceMean(mlir::AffineForOp forOp, mlir::AffineParallelOp pal);
+  void optimizeElementWise(mlir::AffineForOp forOp, mlir::AffineParallelOp pal);
+
   void clear() {
     layerNormBuffers.clear();
     layerNorms.clear();

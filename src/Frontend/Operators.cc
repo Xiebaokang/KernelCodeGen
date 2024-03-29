@@ -1108,7 +1108,7 @@ mlir::Value LayerNorm::build(ComputeDAG* graph, mlir::Value input, std::vector<i
       mlir::buildAffineLoopNest(outNestedBuilder, outLoc, inLowerBounds, inUpperBounds, inSteps,
       [&](mlir::OpBuilder &inNestedBuilder, mlir::Location inLoc, mlir::ValueRange inIvs) {
         auto ivs = getIndexArgs(inIvs, outIvs);
-        auto ld = inNestedBuilder.create<mlir::AffineLoadOp>(inNestedBuilder.getUnknownLoc(), operands[0], mlir::ValueRange(ivs));
+        auto ld = inNestedBuilder.create<mlir::AffineLoadOp>(inNestedBuilder.getUnknownLoc(), output, mlir::ValueRange(ivs));
         auto div = inNestedBuilder.create<mlir::arith::DivFOp>(inNestedBuilder.getUnknownLoc(), ld, sqrtOp);
         inNestedBuilder.create<mlir::AffineStoreOp>(inNestedBuilder.getUnknownLoc(), div, output, mlir::ValueRange(ivs));
       });

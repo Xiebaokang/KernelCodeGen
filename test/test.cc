@@ -39,7 +39,7 @@ void test_binary() {
   // auto relu = graph.create<ElementWise>(A, "gelu", MemorySpace::inplace);
   // auto cast = graph.create<ElementWise>(A, "cast", MemorySpace::global, "int32");
   std::vector<int64_t> axes = {1, 2};
-  auto cast = graph.create<LayerNorm>(A, axes, MemorySpace::inplace);
+  auto cast = graph.create<LayerNorm>(A, axes, MemorySpace::global);
 
   graph.dump();
 
@@ -156,6 +156,6 @@ int main(int argc, char* argv[]) {
   // test_matmul();
   test_binary();
 
-  test_flash_attention();
+  // test_flash_attention();
 
 }
