@@ -131,4 +131,9 @@ struct LayerNorm : Operator<LayerNorm> {
   static mlir::Value build(ComputeDAG* graph, mlir::Value input, std::vector<int64_t>& axes, MemorySpace ms, const float &eps= 1e-5, const std::string& dtype_ = {""});
 };
 
+struct Gather : Operator<Gather> {
+  static mlir::Value build(ComputeDAG* graph, mlir::Value input, mlir::Value indices, const std::int64_t& axis=0, const std::string& dtype_ = {""});
+  static mlir::Value build(ComputeDAG* graph, mlir::Value input, int indices, const std::int64_t& axis=0, const std::string& dtype_ = {""});
+};
+
 }

@@ -10,39 +10,16 @@ void test_binary() {
   auto graph = generator.createGraph("demo");
   generator.setLogMode(Log::Debug);
 
-  // auto indices = graph.create<PlaceHolder>(std::vector<int64_t>{2, 20}, std::string{"index"});
-  // auto data = graph.create<PlaceHolder>(std::vector<int64_t>{15, 256}, std::string{"float32"});
-  // auto gather1 = graph.create<Gather>(data, indices);
-  // auto gather2 = graph.create<Gather>(data, 0, 1);  // indices:0  axis:1
-
-
-  // auto A = graph.create<PlaceHolder>(std::vector<int64_t>{1, 2048, 64}, std::string{"float32"});
-  // auto B = graph.create<PlaceHolder>(std::vector<int64_t>{1, 2048, 64}, std::string{"float32"});
-  // auto add = graph.create<Binary>(A, B, "add", MemorySpace::global);
-
-  // std::vector<int> dim1{1, 8, 16};
-  // std::vector<int> dim2{1024, 2048};
-  // std::vector<std::vector<mlir::Value>> tensors;
-  // for (auto d1 : dim1) {
-  //   for (auto d2 : dim2) {
-  //     auto A = graph.create<PlaceHolder>(std::vector<int64_t>{d1, d2, 64}, std::string{"float32"});
-  //     auto B = graph.create<PlaceHolder>(std::vector<int64_t>{d1, d2, 64}, std::string{"float32"});
-  //     tensors.push_back({A, B});
-  //   }
-  // }
-  // for (auto tensor : tensors) {
-  //   auto add = graph.create<Binary>(tensor[0], tensor[1], "add", MemorySpace::global);
-  // }
-
+  // auto A = graph.create<PlaceHolder>(std::vector<int64_t>{15, 256}, std::string{"float32"});
+  // auto indices = graph.create<PlaceHolder>(std::vector<int64_t>{256}, std::string{"index"});
+  // auto gather1 = graph.create<Gather>(A, indices);
+  // auto gather2 = graph.create<Gather>(A, 0, 2);  // indices:0  axis:1
   auto A = graph.create<PlaceHolder>(std::vector<int64_t>{16, 2048, 64}, std::string{"float32"});
-  // auto tanh = graph.create<ElementWise>(A, "tanh", MemorySpace::inplace);
-  // auto relu = graph.create<ElementWise>(A, "gelu", MemorySpace::inplace);
-  // auto cast = graph.create<ElementWise>(A, "cast", MemorySpace::global, "int32");
+  // auto gelu = graph.create<ElementWise>(A, "gelu", MemorySpace::inplace);
   std::vector<int64_t> axes = {1, 2};
-  auto cast = graph.create<LayerNorm>(A, axes, MemorySpace::global);
+  auto layer = graph.create<LayerNorm>(A, axes, MemorySpace::global);
 
   graph.dump();
-
   auto module = generator.optimize(graph);
   generator.dump(module);
   auto&& sourceCode = generator.codegen(module);

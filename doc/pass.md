@@ -1311,4 +1311,59 @@ module @demo {
   %1 = func.call @LayerNorm_16_2048_64_axes_1_2(%0) : (memref<16x2048x64xf32, 1>) -> memref<16x2048x64xf32, 1>
 }
 
+
+1*2048*64
+ -- mine layerNorm cost is : 0.024525
+8*2048*64
+ -- mine layerNorm cost is : 0.028122
+16*2048*64
+ -- mine layerNorm cost is : 0.030186
+1*1024*64
+ -- mine layerNorm cost is : 0.013872
+8*1024*64
+ -- mine layerNorm cost is : 0.013603
+16*1024*64
+ -- mine layerNorm cost is : 0.015894
+
+func.func @Gather_15_256_indices_2_20_axis_0(%arg0: memref<15x256xf32, 1>, %arg1: memref<2x20xindex, 1>) -> memref<2x20x256xf32, 1> attributes {func.state = "cpu"} {
+    %3 = memref.alloc() : memref<2x20x256xf32, 1>
+    affine.parallel (%arg2, %arg3) = (0, 0) to (2, 2) {
+      %4 = affine.apply affine_map<(d0) -> (d0 * 64)>(%arg2)
+      %5 = affine.apply affine_map<(d0) -> (d0 * 64)>(%arg3)
+      affine.parallel (%arg4, %arg5) = (0, 0) to (16, 16) {
+        %6 = affine.apply affine_map<(d0) -> (d0 * 4)>(%arg4)
+        %7 = affine.apply affine_map<(d0) -> (d0 * 4)>(%arg5)
+        affine.for %arg6 = 0 to 4 {
+          affine.for %arg7 = 0 to 4 {
+            %8 = affine.load %arg1[((%4 + %6 + %arg6) * 80 + %5 + %7 + %arg7) floordiv 5120, (((%4 + %6 + %arg6) * 80 + %5 + %7 + %arg7) mod 5120) floordiv 256] : memref<2x20xindex, 1>
+            %9 = affine.apply affine_map<(d0, d1, d2, d3, d4, d5) -> (((d0 + d1 + d2) * 80 + d3 + d4 + d5) mod 256)>(%4, %6, %arg6, %5, %7, %arg7)
+            %10 = memref.load %arg0[%8, %9] : memref<15x256xf32, 1>
+            affine.store %10, %3[((%4 + %6 + %arg6) * 80 + %5 + %7 + %arg7) floordiv 5120, (((%4 + %6 + %arg6) * 80 + %5 + %7 + %arg7) mod 5120) floordiv 256, ((%4 + %6 + %arg6) * 80 + %5 + %7 + %arg7) mod 256] : memref<2x20x256xf32, 1>
+          }
+        }
+      }
+    }
+    return %3 : memref<2x20x256xf32, 1>
+}
+
+func.func @Gather_15_256_indices_0_axis_0(%arg0: memref<15x256xf32, 1>) -> memref<256xf32, 1> attributes {func.state = "cpu"} {
+    %3 = memref.alloc() : memref<256xf32, 1>
+    affine.parallel (%arg1, %arg2) = (0, 0) to (1, 1) {
+      %4 = affine.apply affine_map<(d0) -> (d0 * 64)>(%arg1)
+      %5 = affine.apply affine_map<(d0) -> (d0 * 64)>(%arg2)
+      affine.parallel (%arg3, %arg4) = (0, 0) to (16, 16) {
+        %c0 = arith.constant 0 : index
+        %6 = affine.apply affine_map<(d0) -> (d0 * 4)>(%arg3)
+        %7 = affine.apply affine_map<(d0) -> (d0 * 4)>(%arg4)
+        affine.for %arg5 = 0 to 4 {
+          affine.for %arg6 = 0 to 4 {
+            %8 = affine.load %arg0[%c0, ((%4 + %6 + %arg5) * 16 + %5 + %7 + %arg6) mod 256] : memref<15x256xf32, 1>
+            affine.store %8, %3[((%4 + %6 + %arg5) * 16 + %5 + %7 + %arg6) mod 256] : memref<256xf32, 1>
+          }
+        }
+      }
+    }
+    return %3 : memref<256xf32, 1>
+  }
+
 ```

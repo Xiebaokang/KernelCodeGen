@@ -266,6 +266,8 @@ struct Rewriter {
   
   static void scheduleOpGridToBlock(mlir::AffineParallelOp gridLevel, mlir::AffineParallelOp blockLevel);
   
+  static void deleteExtraCstOp(mlir::AffineParallelOp blockLevel);
+
 };
 
 }

@@ -1122,4 +1122,161 @@ mlir::Value LayerNorm::build(ComputeDAG* graph, mlir::Value input, std::vector<i
   return callOp.getResult(0);
 }
 
+mlir::Value Gather::build(ComputeDAG* graph, mlir::Value input, mlir::Value indices, const std::int64_t& axis, const std::string& dtype_) {
+  auto builder = graph->builder;
+  auto type_input = input.getType();
+  auto type_indices = indices.getType();
+  llvm::ArrayRef<int64_t> input_shape, indices_shape;
+  mlir::Type elementType;
+
+  if(type_input.isa<mlir::MemRefType>()) {
+    auto shape = type_input.dyn_cast<mlir::MemRefType>();
+    input_shape = shape.getShape();
+    elementType = shape.getElementType();
+  }
+  else {
+    llvm::errs() << "Type of operand of Gather is not Memref.\n";
+    return nullptr;
+  }
+
+  if(type_indices.isa<mlir::MemRefType>()) {
+    auto shape_ = type_indices.dyn_cast<mlir::MemRefType>();
+    indices_shape = shape_.getShape();
+  }
+  else {
+    llvm::errs() << "Type of operand of Gather is not Memref.\n";
+    return nullptr;
+  }
+
+  if (axis >= input_shape.size()){
+    llvm::errs() << "Can't apply Gather Operation due to axis is greater than shape of input.\n";
+    return nullptr;
+  }
+  
+  auto dtype = dtype_ != ""  ? dtype_ : toStr(elementType);
+
+  std::vector<int64_t> new_shape = input_shape;
+  new_shape.erase(new_shape.begin() + axis);
+
+  for (int i=0; i<indices_shape.size(); i++) {
+      auto loc = new_shape.begin() + axis + i;
+      new_shape.insert(loc, indices_shape[i]);
+  }
+
+  auto funcName = std::string({"Gather"});
+
+  for (auto shape : input_shape) {
+    funcName += "_" + std::to_string(shape);
+  }
+  funcName += "_indices";
+
+  for (auto shape : indices_shape) {
+    funcName += "_" + std::to_string(shape);
+  }
+  funcName += "_axis_" + std::to_string(axis);
+
+  auto ip = builder.saveInsertionPoint();
+  auto emType = getDType(builder, dtype);
+  auto typeC = mlir::MemRefType::get(llvm::ArrayRef<int64_t>(new_shape), emType, {}, static_cast<int>(MemorySpace::global));
+  auto funcOp = buildFuction(graph->module, builder, funcName, {input.getType(), indices.getType()}, {typeC});
+
+  auto& bodyBlock = funcOp.front();
+  builder.setInsertionPointToStart(&bodyBlock);
+  mlir::ValueRange operands = bodyBlock.getArguments();
+
+  auto allocOp = builder.create<mlir::memref::AllocOp>(builder.getUnknownLoc(), typeC);
+  auto output = allocOp.getResult();
+
+  mlir::SmallVector<int64_t> lowerBounds(new_shape.size(), /*Value=*/0);
+  mlir::SmallVector<int64_t> steps(new_shape.size(), /*Value=*/1);
+  mlir::SmallVector<int64_t> upperBounds(new_shape.begin(), new_shape.end());
+  mlir::buildAffineLoopNest(builder, builder.getUnknownLoc(), lowerBounds, upperBounds, steps,
+    [&](mlir::OpBuilder &nestedBuilder, mlir::Location loc, mlir::ValueRange ivs) {
+      mlir::SmallVector<mlir::Value> input_index = ivs;
+      mlir::SmallVector<mlir::Value> indeces_index;
+      for (int i=0; i<indices_shape.size(); i++) {
+        indeces_index.push_back(ivs[axis + i]);
+      }
+      auto index = nestedBuilder.create<mlir::AffineLoadOp>(nestedBuilder.getUnknownLoc(), operands[1], mlir::ValueRange(indeces_index));
+      auto index_ = index.getResult();
+      input_index.erase(input_index.begin() + axis, input_index.begin() + axis + indices_shape.size());
+      input_index.insert(input_index.begin() + axis, index);
+      auto ld_elem = nestedBuilder.create<mlir::memref::LoadOp>(nestedBuilder.getUnknownLoc(), operands[0], mlir::ValueRange(input_index));
+      nestedBuilder.create<mlir::AffineStoreOp>(nestedBuilder.getUnknownLoc(), ld_elem, output, mlir::ValueRange(ivs));
+    }
+  );
+  builder.create<mlir::func::ReturnOp>(builder.getUnknownLoc(), output);
+
+  builder.restoreInsertionPoint(ip);
+  auto callOp = builder.create<mlir::func::CallOp>(builder.getUnknownLoc(), funcOp, mlir::ValueRange({input, indices}));
+  funcOp->setAttr(std::string("func.state"), builder.getStringAttr("cpu"));
+  return callOp.getResult(0);
+}
+
+mlir::Value Gather::build(ComputeDAG* graph, mlir::Value input, int indices, const std::int64_t& axis, const std::string& dtype_) {
+  // gather 的axis=0表示最高维度
+  auto builder = graph->builder;
+  auto type_input = input.getType();
+  llvm::ArrayRef<int64_t> input_shape;
+  mlir::Type elementType;
+
+  if(type_input.isa<mlir::MemRefType>()) {
+    auto shape = type_input.dyn_cast<mlir::MemRefType>();
+    input_shape = shape.getShape();
+    elementType = shape.getElementType();
+  }
+  else {
+    llvm::errs() << "Type of operand of Gather is not Memref.\n";
+    return nullptr;
+  }
+
+  if (axis >= input_shape.size()){
+    llvm::errs() << "Can't apply Gather Operation due to axis is greater than shape of input.\n";
+    return nullptr;
+  }
+  
+  auto dtype = dtype_ != ""  ? dtype_ : toStr(elementType);
+
+  std::vector<int64_t> new_shape = input_shape;
+  new_shape.erase(new_shape.begin() + axis);
+
+  auto funcName = std::string({"Gather"});
+
+  for (auto shape : input_shape) {
+    funcName += "_" + std::to_string(shape);
+  }
+  funcName += "_indices_" + std::to_string(indices) + "_axis_" + std::to_string(axis);
+
+  auto ip = builder.saveInsertionPoint();
+  auto emType = getDType(builder, dtype);
+  auto typeC = mlir::MemRefType::get(llvm::ArrayRef<int64_t>(new_shape), emType, {}, static_cast<int>(MemorySpace::global));
+  auto funcOp = buildFuction(graph->module, builder, funcName, {input.getType()}, {typeC});
+
+  auto& bodyBlock = funcOp.front();
+  builder.setInsertionPointToStart(&bodyBlock);
+  mlir::ValueRange operands = bodyBlock.getArguments();
+
+  auto allocOp = builder.create<mlir::memref::AllocOp>(builder.getUnknownLoc(), typeC);
+  auto output = allocOp.getResult();
+
+  mlir::SmallVector<int64_t> lowerBounds(new_shape.size(), /*Value=*/0);
+  mlir::SmallVector<int64_t> steps(new_shape.size(), /*Value=*/1);
+  mlir::SmallVector<int64_t> upperBounds(new_shape.begin(), new_shape.end());
+  mlir::buildAffineLoopNest(builder, builder.getUnknownLoc(), lowerBounds, upperBounds, steps,
+    [&](mlir::OpBuilder &nestedBuilder, mlir::Location loc, mlir::ValueRange ivs) {
+      mlir::SmallVector<mlir::Value> input_index = ivs;
+      auto index = nestedBuilder.create<mlir::arith::ConstantIndexOp>(nestedBuilder.getUnknownLoc(), indices);
+      input_index.insert(input_index.begin() + axis, index);
+      auto ld_elem = nestedBuilder.create<mlir::AffineLoadOp>(nestedBuilder.getUnknownLoc(), operands[0], mlir::ValueRange(input_index));
+      nestedBuilder.create<mlir::AffineStoreOp>(nestedBuilder.getUnknownLoc(), ld_elem, output, mlir::ValueRange(ivs));
+    }
+  );
+  builder.create<mlir::func::ReturnOp>(builder.getUnknownLoc(), output);
+
+  builder.restoreInsertionPoint(ip);
+  auto callOp = builder.create<mlir::func::CallOp>(builder.getUnknownLoc(), funcOp, mlir::ValueRange({input}));
+  funcOp->setAttr(std::string("func.state"), builder.getStringAttr("cpu"));
+  return callOp.getResult(0);
+}
+
 }

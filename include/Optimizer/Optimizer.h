@@ -179,6 +179,33 @@ struct LayerNormOptimizer : Optimizer {
   static std::map<std::string, int> layerNormConfig;
 };
 
+struct GatherOptimizer : Optimizer {
+  GatherOptimizer() {
+    this->name = std::move(std::string("Gather"));
+  }
+  virtual bool applicable(mlir::ModuleOp& module) override;
+  virtual void applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& builder) override;
+  mlir::AffineMap getAffineMap(const std::string& mapIdentifier, mlir::OpBuilder& builder, const std::vector<int64_t> &extras={});
+  void one(mlir::AffineForOp forOp, mlir::Value loadGlo, mlir::Value storeGlo, mlir::Value storeReg);
+
+  void clear() {
+    gatherBuffers.clear();
+    gathers.clear();
+    gatherLoops.clear();
+  }
+
+  struct MemoryBuffer {
+    mlir::Value input;
+    mlir::Value indices;
+    mlir::Value output;
+  };
+
+  std::map<mlir::func::FuncOp, MemoryBuffer, CompareFunc> gatherBuffers;
+  std::set<mlir::func::FuncOp, CompareFunc> gathers;
+  std::map<mlir::func::FuncOp, std::vector<mlir::AffineForOp>, CompareFunc> gatherLoops;
+  static std::map<std::string, int> gatherConfig;
+};
+
 struct FMHAOptimizer : Optimizer {
 
   FMHAOptimizer() {

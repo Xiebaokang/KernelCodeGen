@@ -30,6 +30,7 @@ std::map<std::string, int> FMHAOptimizer::fmhaConfig;
 std::map<std::string, int> BinaryOptimizer::binaryConfig;
 std::map<std::string, int> ElementWiseOptimizer::elementWiseConfig;
 std::map<std::string, int> LayerNormOptimizer::layerNormConfig;
+std::map<std::string, int> GatherOptimizer::gatherConfig;
 
 struct LoadOrStoreOp {
   enum MemRSKind {
@@ -1447,7 +1448,6 @@ std::vector<mlir::Operation*> LayerNormOptimizer::optimizeReduceMean(mlir::Affin
   auto resultType = type.dyn_cast<mlir::MemRefType>();
   auto bufferType = mlir::MemRefType::get({1}, resultType.getElementType(), {}, static_cast<int>(MemorySpace::local));
   auto resultAllocOp = builder.create<mlir::memref::AllocOp>(builder.getUnknownLoc(), bufferType);
-  // auto sumAllocOp = builder.create<mlir::memref::AllocOp>(builder.getUnknownLoc(), bufferType);
 
   mlir::Value cstIndex, cstZero;
   mlir::AffineStoreOp removeStoreOp;
@@ -1512,21 +1512,17 @@ std::vector<mlir::Operation*> LayerNormOptimizer::optimizeReduceMean(mlir::Affin
   auto set = mlir::IntegerSet::get(1, 0, llvm::ArrayRef<mlir::AffineExpr>({dim}), llvm::ArrayRef<bool>({false}));
   auto ifOp = builder.create<mlir::AffineIfOp>(builder.getUnknownLoc(), set, mlir::ValueRange(threadidxs[0]), false);
 
-  // auto ip2 = builder.saveInsertionPoint();
   builder.setInsertionPointToStart(ifOp.getBody());
   auto expr = builder.getAffineDimExpr(0) + warpWidth;
   auto map = mlir::AffineMap::get(1, 0, llvm::ArrayRef<mlir::AffineExpr>({expr}), builder.getContext());
   auto loadOp1 = builder.create<mlir::AffineLoadOp>(builder.getUnknownLoc(), buffer, mlir::ValueRange({threadidxs[0]}));
   auto loadOp2 = builder.create<mlir::AffineLoadOp>(builder.getUnknownLoc(), buffer, map, mlir::ValueRange({threadidxs[0]}));
   auto addOp = builder.create<mlir::arith::AddFOp>(builder.getUnknownLoc(), loadOp1, loadOp2);
-  // builder.create<mlir::AffineStoreOp>(builder.getUnknownLoc(), addOp.getResult(), sumAllocOp, mlir::ValueRange({cstIndex}));
   for (int i=warpWidth/2; i>0; i>>=1) {
-    // auto sumloadOp = builder.create<mlir::AffineLoadOp>(builder.getUnknownLoc(), sumAllocOp, mlir::ValueRange({cstIndex}));
     auto shflOp = builder.create<mlir::gpu::ShuffleOp>(builder.getUnknownLoc(), addOp.getResult(), i, warpWidth, mlir::gpu::ShuffleMode::DOWN);
     addOp = builder.create<mlir::arith::AddFOp>(builder.getUnknownLoc(), shflOp.getResult(0), addOp.getResult());
-    // builder.create<mlir::AffineStoreOp>(builder.getUnknownLoc(), addOp.getResult(), sumAllocOp, mlir::ValueRange({cstIndex}));
   }
-  // builder.restoreInsertionPoint(ip2);
+
 
   //----------------------------x=0
   auto dim_ = builder.getAffineDimExpr(0);
@@ -1710,10 +1706,129 @@ void LayerNormOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& 
     return true;
     });
     DUMP(module);
+
+    Rewriter::deleteExtraCstOp(blockLevel);
   }
 }
 /*--------------------------------------------------------------------*/
 
+/*-----------------------------gather----------------------------*/
+bool GatherOptimizer::applicable(mlir::ModuleOp& module) {
+  clear();
+  auto&& gatherFuncs = Analyzer::collectFunctions(module, "Gather");
+  bool res = gatherFuncs.size() != 0 ? true : false;
+
+  for (auto& gatherFunc : gatherFuncs) {
+    if (gathers.count(gatherFunc) != 0 || gatherLoops.count(gatherFunc) != 0
+      || gatherBuffers.count(gatherFunc) != 0) {
+      llvm::errs() << "Duplicated Gather in module\n";
+    }
+    gathers.insert(gatherFunc);
+    auto&& loops = Analyzer::collectFuncLoops(gatherFunc);
+    gatherLoops[gatherFunc] = std::move(loops);
+    auto funcArgs = gatherFunc.front().getArguments();
+
+    MemoryBuffer buf;
+    buf.input = funcArgs[0];
+    if (funcArgs.size() == 1) {
+      buf.indices = nullptr;
+    } 
+    else { buf.indices = funcArgs[1]; }
+    auto &block = gatherFunc.front();
+    auto returnOp = mlir::dyn_cast<mlir::func::ReturnOp>(block.back());
+    buf.output = returnOp.getOperand(0);
+    gatherBuffers[gatherFunc] = buf;
+  }
+  return res;
+}
+
+mlir::AffineMap GatherOptimizer::getAffineMap(const std::string& mapIdentifier, mlir::OpBuilder& builder, const std::vector<int64_t> &extras) {
+  auto dim0 = builder.getAffineDimExpr(0);
+  auto dim1 = builder.getAffineDimExpr(1);
+  auto dim2 = builder.getAffineDimExpr(2);
+  auto dim3 = builder.getAffineDimExpr(3);
+  auto dim4 = builder.getAffineDimExpr(4);
+  auto dim5 = builder.getAffineDimExpr(5);
+  auto width = 4;  // float4 type width
+
+  if (mapIdentifier == "VectorLoadOrStore") {
+    auto oneDimExpr_y = dim0 + dim1 + dim2;
+    auto oneDimExpr_x = dim3 + dim4 + dim5 * width;
+    llvm::SmallVector<mlir::AffineExpr> exprs;
+    auto oneDimExpr = oneDimExpr_y * extras.back() + oneDimExpr_x;
+    for (int i=0; i<extras[0]; i++) { 
+      if (i == 0) {
+        exprs.push_back(oneDimExpr.floorDiv(extras[i+1]));
+      } else if (i != extras[0] - 1) {
+        auto tmpExpr = oneDimExpr % extras[i];
+        exprs.push_back(tmpExpr.floorDiv(extras[i+1]));
+      } else {
+        exprs.push_back(oneDimExpr % extras[i+1]);
+      }
+    }
+    return mlir::AffineMap::get(/*dimCount*/6, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+  } else if (mapIdentifier == "PointLoadOrStore") {
+    llvm::SmallVector<mlir::AffineExpr> exprs;
+    exprs.push_back(dim0);
+    return mlir::AffineMap::get(/*dimCount*/1, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+  } else {
+    assert(false);
+  }
+}
+
+void GatherOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& builder) {
+  for (auto gather : gathers) {
+    auto loops = gatherLoops[gather];
+    auto buffer = gatherBuffers[gather];
+    auto input = buffer.input; auto indices = buffer.indices; auto output = buffer.output;
+    auto extras = getCreateAffineMapArgs(loops);
+    auto twoLoops = Rewriter::combineToTowDim(loops);
+    extras.push_back(twoLoops[1].getUpperBoundMap().getSingleConstantResult());
+    DUMP(module);
+
+    auto split_out_loops = Rewriter::split(twoLoops[0], 3, {gatherConfig["THREAD_SIZE_M"], gatherConfig["BLOCK_SIZE_M"]});
+    auto split_in_loops = Rewriter::split(twoLoops[1], 3, {gatherConfig["THREAD_SIZE_M"], gatherConfig["BLOCK_SIZE_M"]});
+    DUMP(module);
+
+    auto out_outer = split_out_loops[0], out_mider = split_out_loops[1], out_inner = split_out_loops[2];
+    auto in_outer = split_in_loops[0], in_mider = split_in_loops[1], in_inner = split_in_loops[2];
+    Rewriter::reorder({out_outer, in_outer, out_mider, in_mider, out_inner, in_inner});
+    DUMP(module);
+
+    auto gridLevel = Rewriter::parallel({out_outer, in_outer});
+    auto blockLevel = Rewriter::parallel({out_mider, in_mider});
+    DUMP(module);
+
+    auto blockElemIdx = Rewriter::getElementIdx(gridLevel);
+    auto ThreadElemIdx = Rewriter::getElementIdx(blockLevel);
+    
+    if (!indices) {  // 按常数取
+      in_inner.walk<mlir::WalkOrder::PreOrder>([&](mlir::arith::ConstantOp cstOp) {
+        Rewriter::schedule(cstOp, blockLevel, Position::begin);
+      });
+      bool vecTag = false;
+      in_inner.walk<mlir::WalkOrder::PreOrder>([&](mlir::AffineLoadOp loadOp) {
+        if (loadOp.getMemRef() == input) {
+          auto maps = loadOp.getAffineMap();
+          auto expr = maps.getResults().back();
+          if (expr.isa<mlir::AffineBinaryOpExpr>()) vecTag = true;
+        }
+      });
+      if (vecTag) Rewriter::vectorize(in_inner, 4);
+    } else {  // 按照索引indices取
+      auto input_type = input.getType();
+      auto element = input_type.dyn_cast<mlir::MemRefType>().getElementType();
+      auto storeReg = Rewriter::alloc_buffer(blockLevel, MemorySpace::local, {gatherConfig["THREAD_SIZE_N"]}, element);  // 计算input -> reg
+      auto writeMap = getAffineMap("VectorLoadOrStore", builder, extras);
+      auto cacheWriteMap = getAffineMap("PointLoadOrStore", builder);
+
+      llvm::SmallVector<mlir::Value> operands({blockElemIdx[0], ThreadElemIdx[0], out_inner.getInductionVar(), blockElemIdx[1], ThreadElemIdx[1]});
+      Rewriter::write(storeReg, output, writeMap, operands, gatherConfig["VECTORIZE_WIDTH"], in_inner, Position::after);
+      Rewriter::cache_write(in_inner, output, storeReg, cacheWriteMap, {in_inner.getInductionVar()});
+    }
+  }
+}
+/*--------------------------------------------------------------------*/
 
 void splitString(const std::string& input, char target, std::vector<std::string>& output) {
   std::string cur {""};
