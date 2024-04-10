@@ -29,7 +29,7 @@ public:
     // opts.push_back(std::move(std::make_unique<MatmulOptimizer>()));
     // opts.push_back(std::move(std::make_unique<BinaryOptimizer>()));
     // opts.push_back(std::move(std::make_unique<ElementWiseOptimizer>()));
-    opts.push_back(std::move(std::make_unique<LayerNormOptimizer>()));
+    // opts.push_back(std::move(std::make_unique<LayerNormOptimizer>()));
     // opts.push_back(std::move(std::make_unique<GatherOptimizer>()));
     // opts.push_back(std::move(std::make_unique<FMHAOptimizer>()));
     matmulConfigs = {
@@ -140,6 +140,8 @@ public:
   void setLogMode(Log level) {
     KCGLog::level = level;
   }
+public:
+  std::vector<std::unique_ptr<Optimizer>> opts;
 
 private:
   mlir::MLIRContext context;
@@ -149,7 +151,6 @@ private:
   ComputeDAG graph;
   std::string platform;
   float minLatency = FLT_MAX;
-  std::vector<std::unique_ptr<Optimizer>> opts;
   std::vector<std::map<std::string, int>> matmulConfigs;
   std::vector<std::map<std::string, int>> fmhaConfigs;
   std::vector<std::map<std::string, int>> binaryConfigs;
