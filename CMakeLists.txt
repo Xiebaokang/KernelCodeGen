@@ -9,7 +9,7 @@ set(CMAKE_CUDA_COMPILER /usr/local/cuda-11.1/bin/nvcc)
 
 # project config
 ###################################################################
-cmake_minimum_required(VERSION 3.20.0)
+cmake_minimum_required(VERSION 3.15.0)
 project(KernelCodeGen LANGUAGES CXX C)    # delete CUDA
 
 set(CMAKE_BUILD_WITH_INSTALL_NAME_DIR ON)
