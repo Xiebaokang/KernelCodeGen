@@ -1674,48 +1674,6 @@ std::vector<mlir::Operation*> LayerNormOptimizer::reduceUnrollOptimize(mlir::Aff
   return operaitons;
 }
 
-// void LayerNormOptimizer::optimizeElementWise(mlir::AffineForOp forOp, mlir::AffineParallelOp pal) {
-//   mlir::Value buffer;
-//   mlir::AffineLoadOp cstLoadOp;
-//   int flag = -1;
-//   auto threadidxs = Rewriter::getParallelIdx(pal);  // threadidx
-//   auto threadNum = pal.getUpperBoundMap(0).getSingleConstantResult();  // 512
-//   auto perThread = forOp.getUpperBoundMap().getSingleConstantResult();  // 4
-//   auto& ops = forOp.getBody()->getOperations();
-//   for (auto& op : ops) {
-//     if (auto loadOp = mlir::dyn_cast<mlir::AffineLoadOp>(&op)) {
-//       if (loadOp.getIndices().size() > 1) buffer = loadOp.getMemRef();
-//       else cstLoadOp = loadOp;
-//     } else if (auto subOp = mlir::dyn_cast<mlir::arith::SubFOp>(&op)) {
-//       flag = 0;
-//     } else if (auto mulOp = mlir::dyn_cast<mlir::arith::MulFOp>(&op)) {
-//       flag = 1;
-//     } else if (auto divOp = mlir::dyn_cast<mlir::arith::DivFOp>(&op)) {
-//       flag = 2;
-//     }
-//   }
-//   mlir::OpBuilder builder(forOp);
-//   if (cstLoadOp) cstLoadOp->moveBefore(forOp);
-//   for (int i=0; i<perThread; i++) {
-//     auto expr = builder.getAffineDimExpr(0) + i * threadNum;
-//     auto map = mlir::AffineMap::get(1, 0, llvm::ArrayRef<mlir::AffineExpr>({expr}), builder.getContext());
-//     auto loadOp = builder.create<mlir::AffineLoadOp>(builder.getUnknownLoc(), buffer, map, mlir::ValueRange({threadidxs[0]}));
-//     mlir::Value result;
-//     if (flag == 0){
-//       auto subOp = builder.create<mlir::arith::SubFOp>(builder.getUnknownLoc(), loadOp.getResult(), cstLoadOp.getResult());
-//       result = subOp.getResult();
-//     } else if (flag == 1) {
-//       auto mulOp = builder.create<mlir::arith::MulFOp>(builder.getUnknownLoc(), loadOp.getResult(), loadOp.getResult());
-//       result = mulOp.getResult();
-//     } else {
-//       auto divOp = builder.create<mlir::arith::DivFOp>(builder.getUnknownLoc(), loadOp.getResult(), cstLoadOp.getResult());
-//       result = divOp.getResult();
-//     }
-//     builder.create<mlir::AffineStoreOp>(builder.getUnknownLoc(), result, buffer, map, mlir::ValueRange({threadidxs[0]}));
-//   }
-//   forOp.erase();
-// }
-
 void LayerNormOptimizer::elementWiseUnrollOptimize(mlir::AffineForOp forOp, mlir::AffineParallelOp pal) {
   /*将做elementwies的循环做没有bank confilct的循环展开*/
   std::vector<mlir::AffineLoadOp> tempLoadOps;
@@ -1886,7 +1844,8 @@ void LayerNormOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& 
     auto ub = forOp.getConstantUpperBound();
     auto lb = forOp.getConstantLowerBound();
     auto times = (ub - lb) / step;
-    if (times >= 64) return false;
+    // if (times >= 64) return false;
+    if (times >= 16) return false;
     return true;
     });
     DUMP(module);

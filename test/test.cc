@@ -10,16 +10,16 @@ void test_binary() {
   auto graph = generator.createGraph("demo");
   generator.setLogMode(Log::Debug);
 
-  auto A = graph.create<PlaceHolder>(std::vector<int64_t>{16, 2048, 64}, std::string{"float32"});
-  int64_t axis = 0;
+  auto A = graph.create<PlaceHolder>(std::vector<int64_t>{16, 1024, 64}, std::string{"float32"});
+  // int64_t axis = 0;
   // auto indices = graph.create<PlaceHolder>(std::vector<int64_t>{1}, std::string{"index"});
   // auto gather = graph.create<Gather>(A, indices, axis);
   // auto gelu = graph.create<ElementWise>(A, "gelu", MemorySpace::inplace);
 
   int64_t axis_ = 1;
   float eps=1e-5;
-  auto scale = graph.create<PlaceHolder>(std::vector<int64_t>{16, 2048, 64}, std::string{"float32"});
-  auto bias = graph.create<PlaceHolder>(std::vector<int64_t>{16, 2048, 64}, std::string{"float32"});
+  auto scale = graph.create<PlaceHolder>(std::vector<int64_t>{16, 1024, 64}, std::string{"float32"});
+  auto bias = graph.create<PlaceHolder>(std::vector<int64_t>{16, 1024, 64}, std::string{"float32"});
   auto layernorm = graph.create<LayerNorm>(A, scale, bias, axis_, eps);
 
   // auto A = graph.create<PlaceHolder>(std::vector<int64_t>{16, 2048, 64}, std::string{"float32"});
