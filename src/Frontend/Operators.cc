@@ -608,8 +608,8 @@ mlir::Value Binary::greater(mlir::OpBuilder &builder, mlir::Value elem_1, mlir::
 }
 
 std::map<std::string, std::function<mlir::Value(mlir::OpBuilder&, mlir::Value, mlir::Value)>> Binary::operationMap = {
-    {"add", &Binary::add}, {"mul", &Binary::mul}, {"div", &Binary::div}, {"sub", &Binary::sub},
-    {"pow", &Binary::pow}, {"equal", &Binary::equal}, {"greater", &Binary::greater}
+    {"Add", &Binary::add}, {"Mul", &Binary::mul}, {"Div", &Binary::div}, {"Sub", &Binary::sub},
+    {"Pow", &Binary::pow}, {"Equal", &Binary::equal}, {"Greater", &Binary::greater}
   };
 /*-------------------------------------------------------------------------------------*/
 
@@ -877,8 +877,8 @@ mlir::Value ElementWise::gelu(mlir::OpBuilder &builder, mlir::Value elem, mlir::
 }
 
 std::map<std::string, std::function<mlir::Value(mlir::OpBuilder&, mlir::Value, mlir::Type)>> ElementWise::operationMap = {
-    {"tanh", &ElementWise::tanh}, {"sqrt", &ElementWise::sqrt}, {"log", &ElementWise::log},
-    {"relu", &ElementWise::relu}, {"cast", &ElementWise::cast}, {"gelu", &ElementWise::gelu}
+    {"Tanh", &ElementWise::tanh}, {"Sqrt", &ElementWise::sqrt}, {"Log", &ElementWise::log},
+    {"Relu", &ElementWise::relu}, {"Cast", &ElementWise::cast}, {"Gelu", &ElementWise::gelu}
 };
 /*-------------------------------------------------------------------------------------*/
 
