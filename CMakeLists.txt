@@ -69,4 +69,48 @@ add_subdirectory(include)
 add_subdirectory(src)
 add_subdirectory(test)
 
+file(GLOB HEADERS_ROOT
+  ${PROJECT_SOURCE_DIR}/include/*.h
+  ${PROJECT_SOURCE_DIR}/include/*.hpp
+)
+file(GLOB HEADERS_SUBDIR_Frontend
+  ${PROJECT_SOURCE_DIR}/include/Frontend/*.h
+  ${PROJECT_SOURCE_DIR}/include/Frontend/*.hpp
+)
+file(GLOB HEADERS_SUBDIR_Backend
+  ${PROJECT_SOURCE_DIR}/include/Backend/*.h
+  ${PROJECT_SOURCE_DIR}/include/Backend/*.hpp
+)
+file(GLOB HEADERS_SUBDIR_IR
+  ${PROJECT_SOURCE_DIR}/include/IR/*.h
+  ${PROJECT_SOURCE_DIR}/include/IR/*.hpp
+)
 
+file(GLOB HEADERS_SUBDIR_Optimizer
+  ${PROJECT_SOURCE_DIR}/include/Optimizer/*.h
+  ${PROJECT_SOURCE_DIR}/include/Optimizer/*.hpp
+)
+
+foreach(header ${HEADERS_ROOT})
+    install(FILES ${header} DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/")
+endforeach()
+foreach(header ${HEADERS_SUBDIR_Frontend})
+    install(FILES ${header} DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/Frontend")
+endforeach()
+foreach(header ${HEADERS_SUBDIR_Backend})
+    install(FILES ${header} DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/Backend")
+endforeach()
+foreach(header ${HEADERS_SUBDIR_IR})
+    install(FILES ${header} DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/IR")
+endforeach()
+foreach(header ${HEADERS_SUBDIR_Optimizer})
+    install(FILES ${header} DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/Optimizer")
+endforeach()
+
+install(
+  TARGETS kcg_runtime
+  EXPORT "kcg_runtime-targets"
+  LIBRARY DESTINATION lib
+  ARCHIVE DESTINATION lib
+  RUNTIME DESTINATION bin
+)
