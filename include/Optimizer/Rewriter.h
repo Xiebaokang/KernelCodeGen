@@ -262,7 +262,7 @@ struct Rewriter {
 
   static void swapLoops(std::vector<std::vector<mlir::AffineForOp>> loops);
 
-  static void changeMemoryToShared(mlir::Operation* resultOp, mlir::Value buffer);
+  static void bufferizeOpResult(mlir::Operation* resultOp, mlir::Value buffer);
   
   static void scheduleOpGridToBlock(mlir::AffineParallelOp gridLevel, mlir::AffineParallelOp blockLevel);
   

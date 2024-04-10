@@ -221,7 +221,7 @@ std::vector<mlir::Value> collectVars(mlir::AffineParallelOp node) {
   node.walk<mlir::WalkOrder::PreOrder>([&](mlir::memref::AllocOp allocOp) {
     auto result = allocOp.getResult();
     setValueName(result, "array" + std::to_string(allocCounter++));
-  });
+  });  // 这里就把所有在pal定义的shared mem，或者reg记录到了valueNameMap中，所以在下面的检查中不会发现那些在pal内部定义的memroy
 
   int vectorLoadCounter = 0;
   node.walk<mlir::WalkOrder::PreOrder>([&](mlir::AffineVectorLoadOp vecLoadOp) {
@@ -232,7 +232,6 @@ std::vector<mlir::Value> collectVars(mlir::AffineParallelOp node) {
         setValueName(mem, getArgName());
       }
     }
-    
     auto results = vecLoadOp->getResults();
     for (int i = 0; i < results.size(); i += 1) {
       setValueName(results[i], "vec" + std::to_string(vectorLoadCounter++));
@@ -367,8 +366,6 @@ std::vector<mlir::Value> collectVars(mlir::AffineParallelOp node) {
     auto result = shflOp.getResult(0);
     setValueName(result, "temp" + std::to_string(tempCounter++));
   });
-
-  
 
   std::vector<mlir::Value> result;
   for (auto var : outsidesVars) {

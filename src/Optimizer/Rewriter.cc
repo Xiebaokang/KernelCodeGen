@@ -806,6 +806,7 @@ mlir::AffineForOp Rewriter::vectorize(mlir::AffineForOp readOrWrite, int64_t wid
     auto vectorStore = builder.create<mlir::AffineVectorStoreOp>(builder.getUnknownLoc(), store.getValue(), store.getMemRef(), store.getAffineMap(), store.getMapOperands());
     store.erase();
   });
+  return readOrWrite;
 }
 
 std::vector<std::vector<mlir::AffineForOp>> Rewriter::pipeline(std::vector<mlir::AffineForOp> readBodys, mlir::Value& buffer, mlir::AffineForOp compute_at) {
@@ -2145,7 +2146,7 @@ void Rewriter::swapLoops(std::vector<std::vector<mlir::AffineForOp>> loops) {
   }
 }
 
-void Rewriter::changeMemoryToShared(mlir::Operation* resultOp, mlir::Value buffer) {
+void Rewriter::bufferizeOpResult(mlir::Operation* resultOp, mlir::Value buffer) {
   mlir::OpBuilder builder(resultOp->getNextNode());
   auto parentOp = resultOp->getParentOp();
   auto mainPal = mlir::dyn_cast<mlir::AffineParallelOp>(parentOp);
@@ -2209,19 +2210,35 @@ void Rewriter::deleteExtraCstOp(mlir::AffineParallelOp blockLevel) {
   std::vector<mlir::arith::ConstantIntOp> cstIntOps;
   std::vector<mlir::arith::ConstantFloatOp> cstFloatOps;
   std::vector<mlir::arith::ConstantIndexOp> cstIndexOps;
+  blockLevel.walk<mlir::WalkOrder::PreOrder>([&](mlir::arith::ConstantIndexOp cstIndexOp) {
+    cstIndexOps.push_back(cstIndexOp);
+  });
   blockLevel.walk<mlir::WalkOrder::PreOrder>([&](mlir::arith::ConstantIntOp cstIntOp) {
     cstIntOps.push_back(cstIntOp);
   });
   blockLevel.walk<mlir::WalkOrder::PreOrder>([&](mlir::arith::ConstantFloatOp cstFloatOp) {
     cstFloatOps.push_back(cstFloatOp);
   });
-  blockLevel.walk<mlir::WalkOrder::PreOrder>([&](mlir::arith::ConstantIndexOp cstIndexOp) {
-    cstIndexOps.push_back(cstIndexOp);
-  });
+
 
   mlir::OpBuilder builder(blockLevel);
-  std::map<int, mlir::arith::ConstantOp> intMap; 
   builder.setInsertionPointAfter(&(blockLevel.getBody()->getOperations().front()));
+
+  std::map<int, mlir::arith::ConstantOp> IndexMap; 
+  for (int i=0; i<cstIndexOps.size(); i++) {
+    int val = cstIndexOps[i].value();
+    if (IndexMap.find(val) == IndexMap.end()) {
+      auto cst = builder.create<mlir::arith::ConstantIndexOp>(builder.getUnknownLoc(), val);
+      IndexMap[val] = cst;
+    }
+  }
+  for (auto cstIndexOp : cstIndexOps) {
+    auto val = cstIndexOp.value();
+    cstIndexOp.getResult().replaceAllUsesWith(IndexMap[val].getResult());
+    cstIndexOp.erase();
+  }
+
+  std::map<int, mlir::arith::ConstantOp> intMap; 
   for (int i=0; i<cstIntOps.size(); i++) {
     auto val = cstIntOps[i].value();
     if (intMap.find(val) == intMap.end()) {
@@ -2234,7 +2251,7 @@ void Rewriter::deleteExtraCstOp(mlir::AffineParallelOp blockLevel) {
     cstIntOp.getResult().replaceAllUsesWith(intMap[val].getResult());
     cstIntOp.erase();
   }
-
+  
   std::map<float, mlir::arith::ConstantOp> flaotMap; 
   for (int i=0; i<cstFloatOps.size(); i++) {
     auto val = cstFloatOps[i].value().convertToFloat();
@@ -2249,19 +2266,6 @@ void Rewriter::deleteExtraCstOp(mlir::AffineParallelOp blockLevel) {
     cstFloatOp.erase();
   }
 
-  std::map<int, mlir::arith::ConstantIndexOp> IndexMap; 
-  for (int i=0; i<cstIndexOps.size(); i++) {
-    auto val = cstIndexOps[i].value();
-    if (IndexMap.find(val) == IndexMap.end()) {
-      auto cst = builder.create<mlir::arith::ConstantIndexOp>(builder.getUnknownLoc(), val);
-      IndexMap[val] = cst;
-    }
-  }
-  for (auto cstIndexOp : cstIndexOps) {
-    auto val = cstIndexOp.value();
-    cstIndexOp.getResult().replaceAllUsesWith(IndexMap[val].getResult());
-    cstIndexOp.erase();
-  }
 }
 
 }

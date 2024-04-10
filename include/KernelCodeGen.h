@@ -24,10 +24,7 @@ namespace KernelCodeGen {
 
 class KernelCodeGenerator {
 public:
-  KernelCodeGenerator(const std::string& platform_ = {"CUDA"}) : 
-    builder(&context),
-    graph(builder),
-    platform(std::move(platform_)) {
+  KernelCodeGenerator(const std::string& platform_ = {"CUDA"}) : builder(&context), graph(builder), platform(std::move(platform_)) {
     initMLIRContext();
     // opts.push_back(std::move(std::make_unique<MatmulOptimizer>()));
     // opts.push_back(std::move(std::make_unique<BinaryOptimizer>()));
