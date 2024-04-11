@@ -258,7 +258,9 @@ bool MatmulOptimizer::applicable(mlir::ModuleOp& module) {
     MemoryBuffer ABC;
     ABC.A = funcArgs[0];
     ABC.B = funcArgs[1];
-    ABC.C = funcArgs[2];
+    auto &block = matmulFunc.front();
+    auto returnOp = mlir::dyn_cast<mlir::func::ReturnOp>(block.back());
+    ABC.C = returnOp.getOperand(0);
     // matmulBuffers[matmulFunc] = MemoryBuffer(funcArgs[0].dyn_cast<mlir::Value>(), 
     //   funcArgs[1].dyn_cast<mlir::Value>(), funcArgs[2].dyn_cast<mlir::Value>());
     matmulBuffers[matmulFunc] = ABC;
@@ -500,7 +502,7 @@ void MatmulOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& bui
     Rewriter::reorder({m_inner_0, n_inner_0, m_inner_1, n_inner_1});
     DUMP(module);
 
-    Rewriter::cache_write(m_inner_0, C, tileC, getAffineMap("cacheWriteC", builder), 
+    Rewriter::cache_write(m_inner_0, C, C, getAffineMap("cacheWriteC", builder), 
                           {threadIdx[0], threadIdx[1], blockIdx[0], blockIdx[1], m_inner_0.getInductionVar(),
                           n_inner_0.getInductionVar(), m_inner_1.getInductionVar(), n_inner_1.getInductionVar()});
     DUMP(module);

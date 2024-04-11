@@ -116,7 +116,7 @@ mlir::Value PlaceHolder::build(ComputeDAG* graph, const std::vector<int64_t>& sh
   return allocOp.getResult();
 }
 
-mlir::Value Matmul::build(ComputeDAG* graph, mlir::Value A, mlir::Value B, MemorySpace ms, const std::string& dtype_) {
+mlir::Value Matmul::build(ComputeDAG* graph, mlir::Value A, mlir::Value B/*, MemorySpace ms*/, const std::string& dtype_) {
   
   auto builder = graph->builder;
   auto typeA = A.getType();
@@ -154,25 +154,29 @@ mlir::Value Matmul::build(ComputeDAG* graph, mlir::Value A, mlir::Value B, Memor
     return nullptr;
   }
 
-  auto funcName = std::string({"Matmul_m"}) + std::to_string(m) + 
-                  "n" + std::to_string(n) +  "k" + std::to_string(k1);
+  auto funcName = std::string({"Matmul_m"}) + std::to_string(m) + "n" + std::to_string(n) +  "k" + std::to_string(k1);
 
   auto emType = getDType(builder, dtype);
-  auto typeC = mlir::MemRefType::get(llvm::ArrayRef<int64_t>(
-    std::vector<int64_t>{m, n}), emType, {}, static_cast<int>(ms));
-
-  // Create C buffer as the result.
-  auto allocOp = builder.create<mlir::memref::AllocOp>(builder.getUnknownLoc(), typeC);
-  auto C = allocOp.getResult();
+  auto typeC = mlir::MemRefType::get(llvm::ArrayRef<int64_t>(std::vector<int64_t>{m, n}), emType, {}, static_cast<int>(MemorySpace::global));
 
   auto ip = builder.saveInsertionPoint();
-  auto funcOp = buildFuction(graph->module, builder, funcName, {typeA, typeB, typeC}, {typeC});
+  auto funcOp = buildFuction(graph->module, builder, funcName, {typeA, typeB}, {typeC});
   // auto& bodyBlock = funcOp.getBody().front(); // the same
   auto& bodyBlock = funcOp.front();
-  builder.setInsertionPointToStart(&bodyBlock);
 
+  if (bodyBlock.getOperations().size() > 0) {
+    auto callOp = builder.create<mlir::func::CallOp>(builder.getUnknownLoc(), funcOp, mlir::ValueRange({A, B}));
+    funcOp->setAttr(std::string("func.state"), builder.getStringAttr("cpu"));
+    return callOp.getResult(0);
+  } 
+
+  builder.setInsertionPointToStart(&bodyBlock);
   mlir::ValueRange operands = bodyBlock.getArguments();
-  
+
+  mlir::Value output;
+  auto allocOp = builder.create<mlir::memref::AllocOp>(builder.getUnknownLoc(), typeC);
+  output = allocOp.getResult();
+
   // void buildAffineLoopNest(OpBuilder &builder, Location loc,
   //                         ArrayRef<int64_t> lbs, ArrayRef<int64_t> ubs,
   //                         ArrayRef<int64_t> steps,
@@ -181,8 +185,7 @@ mlir::Value Matmul::build(ComputeDAG* graph, mlir::Value A, mlir::Value B, Memor
   mlir::SmallVector<int64_t, 3> lowerBounds(2, /*Value=*/0);
   mlir::SmallVector<int64_t, 3> steps(2, /*Value=*/1);
   mlir::SmallVector<int64_t, 3> upperBounds({m, n});
-  mlir::buildAffineLoopNest(
-    builder, builder.getUnknownLoc(), lowerBounds, upperBounds, steps,
+  mlir::buildAffineLoopNest(builder, builder.getUnknownLoc(), lowerBounds, upperBounds, steps,
     [&](mlir::OpBuilder &nestedBuilder, mlir::Location loc, mlir::ValueRange ivs) {
       auto i = ivs[0];
       auto j = ivs[1];
@@ -190,31 +193,27 @@ mlir::Value Matmul::build(ComputeDAG* graph, mlir::Value A, mlir::Value B, Memor
       //   return FloatAttr::get(type, value);
       // }
       // initilize to 0
-      auto zero = nestedBuilder.create<mlir::arith::ConstantOp>(nestedBuilder.getUnknownLoc(), 
-          nestedBuilder.getFloatAttr(emType, 0));
+      auto zero = nestedBuilder.create<mlir::arith::ConstantOp>(nestedBuilder.getUnknownLoc(), nestedBuilder.getFloatAttr(emType, 0));
 
-      auto kLoopBody = [&](mlir::OpBuilder &builder, mlir::Location nestedLoc, mlir::Value iv,
-                          mlir::ValueRange iterArgs) {
+      auto kLoopBody = [&](mlir::OpBuilder &builder, mlir::Location nestedLoc, mlir::Value iv, mlir::ValueRange iterArgs) {
         mlir::OpBuilder::InsertionGuard nestedGuard(builder);
         auto k = iv;
-        auto ld_a = builder.create<mlir::AffineLoadOp>(
-                      builder.getUnknownLoc(), /*A*/operands[0], mlir::ValueRange({i, k}));
-        auto ld_b = builder.create<mlir::AffineLoadOp>(
-                      builder.getUnknownLoc(), /*B*/operands[1], mlir::ValueRange({k, j}));
+        auto ld_a = builder.create<mlir::AffineLoadOp>(builder.getUnknownLoc(), /*A*/operands[0], mlir::ValueRange({i, k}));
+        auto ld_b = builder.create<mlir::AffineLoadOp>(builder.getUnknownLoc(), /*B*/operands[1], mlir::ValueRange({k, j}));
         auto mul = builder.create<mlir::arith::MulFOp>(builder.getUnknownLoc(), ld_a, ld_b);
         auto add = builder.create<mlir::arith::AddFOp>(builder.getUnknownLoc(), mul, iterArgs[0]);
         builder.create<mlir::AffineYieldOp>(builder.getUnknownLoc(), add.getResult());
       };
-      auto Cij = nestedBuilder.create<mlir::AffineForOp>(nestedBuilder.getUnknownLoc(), 
-        0, k1, 1, /*iterArgs=lvm::None*/ mlir::ValueRange({zero.getResult()}), kLoopBody);
+      auto Cij = nestedBuilder.create<mlir::AffineForOp>(nestedBuilder.getUnknownLoc(), 0, k1, 1, mlir::ValueRange({zero.getResult()}), kLoopBody);
 
-      nestedBuilder.create<mlir::AffineStoreOp>(nestedBuilder.getUnknownLoc(), 
-          Cij.getResult(0), /*C*/operands[2], mlir::ValueRange({i, j}));
+      nestedBuilder.create<mlir::AffineStoreOp>(nestedBuilder.getUnknownLoc(), Cij.getResult(0), /*C*/output, mlir::ValueRange({i, j}));
     }
   );
-  builder.create<mlir::func::ReturnOp>(builder.getUnknownLoc(), operands[2]);
+  builder.create<mlir::func::ReturnOp>(builder.getUnknownLoc(), output);
+
+
   builder.restoreInsertionPoint(ip);
-  auto callOp = builder.create<mlir::func::CallOp>(builder.getUnknownLoc(), funcOp, mlir::ValueRange({A, B, C}));
+  auto callOp = builder.create<mlir::func::CallOp>(builder.getUnknownLoc(), funcOp, mlir::ValueRange({A, B}));
   funcOp->setAttr(std::string("func.state"), builder.getStringAttr("cpu"));
   return callOp.getResult(0);
 }

@@ -77,7 +77,7 @@ struct PlaceHolder : Operator<PlaceHolder> {
 };
 
 struct Matmul : Operator<Matmul> {
-  static mlir::Value build(ComputeDAG* graph, mlir::Value A, mlir::Value B, MemorySpace ms, const std::string& dtype = {""});
+  static mlir::Value build(ComputeDAG* graph, mlir::Value A, mlir::Value B/*, MemorySpace ms*/, const std::string& dtype = {""});
 };
 
 struct Relu : Operator<Relu> {
