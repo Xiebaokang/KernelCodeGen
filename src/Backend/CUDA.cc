@@ -1082,9 +1082,9 @@ std::string CUDAGen(mlir::ModuleOp &module) {
   source.clear();
   source.str("");
   source << "#include \"cuda_runtime.h\"\n";
-  source << "namespace " + module.getName().value().str() + " {\n";
+  // source << "namespace " + module.getName().value().str() + " {\n";
   CUDAGenerator().codegen(module); 
-  source << "}\n";
+  // source << "}\n";
   std::string sourceStr = source.str();
   if (KCGLog::level == Log::Debug) {
     llvm::errs() << sourceStr;
