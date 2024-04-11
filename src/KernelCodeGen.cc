@@ -3,7 +3,7 @@
 
 namespace KernelCodeGen {
 
-Log KCGLog::level = Log::Debug;
+Log KCGLog::level = Log::Release;
 
 mlir::ModuleOp& KernelCodeGenerator::optimize(ComputeDAG& graph_) {
   graph = graph_;
