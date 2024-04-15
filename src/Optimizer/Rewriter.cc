@@ -1713,6 +1713,57 @@ int getMaxExprDim(mlir::AffineExpr expr) {
   }
 }
 
+std::set<int> getAllExprDim(mlir::AffineExpr expr) {
+  std::set<int> data;
+  if (auto dimExpr_ = expr.dyn_cast<mlir::AffineDimExpr>()) {
+    data.insert(dimExpr_.getPosition());
+    return data;
+  } else if (auto binaryExpr_ = expr.dyn_cast<mlir::AffineBinaryOpExpr>()) {
+    auto LHS = getAllExprDim(binaryExpr_.getLHS());
+    auto RHS = getAllExprDim(binaryExpr_.getRHS());
+    data.insert(LHS.begin(), LHS.end());
+    data.insert(RHS.begin(), RHS.end());
+    return data;
+  } else {
+    return data;
+  }
+}
+
+mlir::AffineExpr modifyExprDim(mlir::MLIRContext* context, mlir::AffineExpr expr, int orgDim, int modDim) {
+  if (auto dimExpr_ = expr.dyn_cast<mlir::AffineDimExpr>()) {
+    if (dimExpr_.getPosition() == orgDim)
+      return mlir::getAffineDimExpr(modDim, context);
+    return expr;
+  } else if (auto binaryExpr_ = expr.dyn_cast<mlir::AffineBinaryOpExpr>()){
+    auto LHS = modifyExprDim(context, binaryExpr_.getLHS(), orgDim, modDim);
+    auto RHS = modifyExprDim(context, binaryExpr_.getRHS(), orgDim, modDim);
+    return mlir::getAffineBinaryOpExpr(binaryExpr_.getKind(), LHS, RHS);
+  } else {
+    // allowed dim, constant, binaryOp
+    auto constExpr_ = expr.dyn_cast<mlir::AffineConstantExpr>();
+    assert(constExpr_);
+    return constExpr_;
+  }
+}
+
+void orderizeExprs(mlir::MLIRContext* context, llvm::SmallVector<mlir::AffineExpr>& exprs) {
+  std::set<int> tempAlldims;
+  llvm::SmallVector<mlir::AffineExpr> resultExprs(exprs.begin(), exprs.end());
+  for (auto expr: exprs) {
+    auto dims = getAllExprDim(expr);
+    tempAlldims.insert(dims.begin(), dims.end());
+  }
+  std::vector<int> alldims(tempAlldims.begin(), tempAlldims.end());
+  std::sort(alldims.begin(), alldims.end());
+  for (int i=0; i<alldims.size(); i++) {
+    if (alldims[i] != i){
+      for (int j=0; j<resultExprs.size(); j++) {
+        exprs[j] = modifyExprDim(context, resultExprs[j], alldims[i], i);
+      }
+    }
+  }
+}
+
 std::pair<int, int> getDimExprNum(llvm::SmallVector<mlir::AffineExpr> exprs) {
   int num = 0;
   int binaryExpr = -1;
@@ -1757,44 +1808,85 @@ int replaceIndexWithExprMoreToTwo(mlir::OpBuilder &builder, std::vector<mlir::Bl
 }
 
 template <typename AffineMemoryOp>
-int replaceIndexWithExprMoreToOne(mlir::OpBuilder &builder, std::vector<mlir::BlockArgument> oldIvs, mlir::Value newIvs, AffineMemoryOp memOp, 
+int replaceIndexWithExprMoreToOne(mlir::OpBuilder &builder, std::vector<mlir::BlockArgument> oldIvs, mlir::Value newIv, AffineMemoryOp memOp, 
                                   std::vector<mlir::AffineExpr> replaceExprs, llvm::SmallVector<mlir::AffineExpr>& exprs, llvm::SmallVector<mlir::Value>& operands) {
-
-  llvm::SmallVector<mlir::Value> operands_(memOp.getMapOperands());  // {arg1 arg2 arg3}
-  for (auto operand_ : operands_) {
-    int max_dim = -1;
-    for (auto expr : exprs) {
-      auto temp_dim = getMaxExprDim(expr);
-      if (temp_dim > max_dim) { max_dim = temp_dim; }
+  llvm::SmallVector<mlir::Value> operands_(memOp.getMapOperands());
+  int oldLoopNum = oldIvs.size();
+  std::vector<int> indices, targetDims(oldLoopNum, -1);
+  std::vector<bool> founds(oldLoopNum, false);
+  for (auto item : operands_) {  //  {%arg3, %arg4, %arg5, %arg7, %arg9, %arg6, %arg8, %arg10}
+    for (int i=0; i<oldLoopNum; i++) {
+      if (!founds[i]) targetDims[i]++;
     }
-    auto it = std::find(oldIvs.begin(), oldIvs.end(), operand_);  // oldivs {arg2 arg3} - {arg_/2048, arg_%2048}
+    auto it = std::find(oldIvs.begin(), oldIvs.end(), item);  // {%arg7, %arg8}
     if (it != oldIvs.end()) {
       int index = std::distance(oldIvs.begin(), it);
-      int binary_max_dim = -1;
-      for (auto binary : exprs) {
-        if (auto binaryExpr = binary.dyn_cast<mlir::AffineBinaryOpExpr>())
-          binary_max_dim = getMaxExprDim(binaryExpr);
-      }
-      mlir::AffineExpr expr;
-      if (binary_max_dim != -1) {
-        expr = shiftAffineExprDim(builder.getContext(), replaceExprs[index], binary_max_dim);
-      } else {
-        expr = shiftAffineExprDim(builder.getContext(), replaceExprs[index], max_dim+1);
-      }
-      exprs.push_back(expr);
-      operands.push_back(newIvs);
+      indices.push_back(index);
+      founds[index] = true;
+      auto it_ = std::find(operands.begin(), operands.end(), newIv);
+      if (it_ == operands.end())
+        operands.push_back(newIv);
     } else {
-      mlir::AffineExpr expr;
-      if (max_dim == -1) {
-        expr = mlir::getAffineDimExpr(0, builder.getContext());
-      } else {
-        expr = mlir::getAffineDimExpr(max_dim + 1, builder.getContext());
-      }
-      exprs.push_back(expr);
-      operands.push_back(operand_);
+      operands.push_back(item);
     }
   }
+  auto minDim = std::min_element(targetDims.begin(), targetDims.end());
+  for (auto index : indices) {
+    replaceExprs[index] = shiftAffineExprDim(builder.getContext(), replaceExprs[index], *minDim);
+  }
+  auto map = memOp.getAffineMap();
+  auto exprs_ = map.getResults();
+  for (auto expr_ : exprs_) {
+    for (auto index: indices) {
+      expr_ = getModifiedExpr(builder.getContext(), expr_, replaceExprs[index], targetDims[index], 1);
+    }
+    exprs.push_back(expr_);
+  }
+  // 将{d0 d1 d3 d5} -> {d0 d1 d2 d3}
+  orderizeExprs(builder.getContext(), exprs);
+  // for (auto e : exprs) {llvm::outs() << "{" << e << "}  "; }llvm::outs() << "\n";
   return operands.size();
+  // llvm::SmallVector<mlir::Value> operands_(memOp.getMapOperands());  // {%arg3, %arg4, %arg5, %arg7, %arg9, %arg11}  is in oldivs {%arg7, %arg8}
+  // llvm::outs() << operands_.size() << "\n";
+  // for (auto operand_ : operands_) {
+  //   int max_dim = -1;
+  //   for (auto expr : exprs) {
+  //     auto temp_dim = getMaxExprDim(expr);
+  //     if (temp_dim > max_dim) { max_dim = temp_dim; }
+  //   }
+  //   auto it = std::find(oldIvs.begin(), oldIvs.end(), operand_);  // oldivs {%arg7, %arg8} - {arg_/2048, arg_%2048}
+  //   if (it != oldIvs.end()) {
+  //     int index = std::distance(oldIvs.begin(), it);
+  //     int binary_max_dim = -1;
+  //     for (auto binary : exprs) {
+  //       if (auto binaryExpr = binary.dyn_cast<mlir::AffineBinaryOpExpr>())
+  //         binary_max_dim = getMaxExprDim(binaryExpr);
+  //     }
+  //     mlir::AffineExpr expr;
+  //     if (binary_max_dim != -1) {
+
+  //       expr = shiftAffineExprDim(builder.getContext(), replaceExprs[index], binary_max_dim);
+  //     } else {
+  //       expr = shiftAffineExprDim(builder.getContext(), replaceExprs[index], max_dim+1);
+  //     }
+  //     exprs.push_back(expr);
+  //     auto it_ = std::find(operands.begin(), operands.end(), newIv);
+  //     if (it_ == operands.end())
+  //       operands.push_back(newIv);
+  //   } else {
+  //     mlir::AffineExpr expr;
+  //     if (max_dim == -1) {
+  //       expr = mlir::getAffineDimExpr(0, builder.getContext());
+  //     } else {
+  //       expr = mlir::getAffineDimExpr(max_dim + 1, builder.getContext());
+  //     }
+  //     exprs.push_back(expr);
+  //     operands.push_back(operand_);
+  //   }
+  // }
+  // llvm::outs() << operands.size() << "\n";
+  // for (auto e : exprs) {llvm::outs() << e << " "; }llvm::outs() << "\n";
+  // return operands.size();
 }
 
 std::vector<mlir::AffineForOp> Rewriter::combineToTowDim(std::vector<mlir::AffineForOp> loops) {
@@ -1818,6 +1910,10 @@ std::vector<mlir::AffineForOp> Rewriter::combineToTowDim(std::vector<mlir::Affin
       combineUps[0] = total_iter / i;
       break;
     }
+  }
+
+  if (loops.size() == 2 && originUps[0] == combineUps[0] && originUps[1] == combineUps[1]) {
+    return loops;
   }
 
   std::vector<mlir::Value> combinIvs;  // 新ivs
@@ -1993,7 +2089,13 @@ mlir::AffineForOp Rewriter::combineToOneDim(std::vector<mlir::AffineForOp> loops
   std::vector<mlir::BlockArgument> oldIvs;
   int64_t combineUp = 1;
 
+  auto firstLoopLower = loops[0].getLowerBoundMap().getSingleConstantResult();
+  auto firstLoopStep = loops[0].getStep();
+
   for (int i=0; i<loops.size(); i++) {
+    auto lower = loops[i].getLowerBoundMap().getSingleConstantResult();
+    auto step = loops[i].getStep();
+    if (firstLoopLower != lower || firstLoopStep != step) assert(false);
     auto upperbound = loops[i].getUpperBoundMap().getSingleConstantResult();
     originUps.push_back(upperbound);
     oldIvs.push_back(loops[i].getInductionVar());
@@ -2010,9 +2112,10 @@ mlir::AffineForOp Rewriter::combineToOneDim(std::vector<mlir::AffineForOp> loops
   
   mlir::AffineForOp newLoop;
   if (loops[0].getNumIterOperands()) {
-    newLoop = builder.create<mlir::AffineForOp>(builder.getUnknownLoc(), 0, combineUp, 1, mlir::ValueRange({loops[0].getIterOperands()[0]}), LoopBody);
+    newLoop = builder.create<mlir::AffineForOp>(builder.getUnknownLoc(), firstLoopLower, combineUp, firstLoopStep,
+                                                mlir::ValueRange({loops[0].getIterOperands()[0]}), LoopBody);
   } else {
-    newLoop = builder.create<mlir::AffineForOp>(builder.getUnknownLoc(), 0, combineUp, 1, mlir::ValueRange({}), LoopBody);
+    newLoop = builder.create<mlir::AffineForOp>(builder.getUnknownLoc(), firstLoopLower, combineUp, firstLoopStep, mlir::ValueRange({}), LoopBody);
   }
   newLoop.getBody()->back().erase();
   newLoop.getBody()->getOperations().splice(newLoop.getBody()->end(), loops.back().getBody()->getOperations());
@@ -2267,5 +2370,55 @@ void Rewriter::deleteExtraCstOp(mlir::AffineParallelOp blockLevel) {
   }
 
 }
+
+mlir::AffineForOp Rewriter::modifyLoopStepToOne(mlir::AffineForOp forOp) {
+  int upperbound = forOp.getUpperBoundMap().getSingleConstantResult();
+  int lowerbound = forOp.getLowerBoundMap().getSingleConstantResult();
+  int step = forOp.getStep();
+  mlir::Value oldIv = forOp.getInductionVar();
+
+  int newUpper = upperbound / step;
+  int newLower = lowerbound / step; 
+
+  mlir::OpBuilder builder(forOp);
+  std::vector<mlir::Value> newIv;
+  auto LoopBody = [&](mlir::OpBuilder &builder, mlir::Location loc, mlir::Value iv, mlir::ValueRange iterArgs) {
+    mlir::OpBuilder::InsertionGuard guard(builder);
+    newIv.push_back(iv);
+    builder.create<mlir::AffineYieldOp>(builder.getUnknownLoc(), iterArgs);
+  };
+  auto newLoop = builder.create<mlir::AffineForOp>(builder.getUnknownLoc(), newLower, newUpper, 1, mlir::ValueRange({}), LoopBody);
+  newLoop.getBody()->back().erase();
+  newLoop.getBody()->getOperations().splice(newLoop.getBody()->end(), forOp.getBody()->getOperations());
+
+  mlir::AffineExpr expr = builder.getAffineDimExpr(0) * step;
+  
+  auto users = oldIv.getUsers();
+  for (auto user : users) {
+    mlir::OpBuilder builder(user);
+    llvm::SmallVector<mlir::AffineExpr> exprs;
+    llvm::SmallVector<mlir::Value> operands;
+    if (auto loadOp = mlir::dyn_cast<mlir::AffineLoadOp>(user)) {
+      auto dimCount = replaceIndexWithExpr(oldIv, newIv, loadOp, expr, exprs, operands);
+      mlir::AffineMap map = mlir::AffineMap::get(dimCount, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+      auto mem = loadOp.getMemref();
+      auto newLoadOp = builder.create<mlir::AffineLoadOp>(builder.getUnknownLoc(), mem, map, llvm::ArrayRef<mlir::Value>(operands));
+      loadOp.getResult().replaceAllUsesWith(newLoadOp.getResult());
+      loadOp.erase();
+    } else if (auto storeOp = mlir::dyn_cast<mlir::AffineStoreOp>(user)) {
+      auto valueToStore = storeOp.getValue();
+      auto mem = storeOp.getMemref();
+      auto dimCount = replaceIndexWithExpr(oldIv, newIv, storeOp, expr, exprs, operands);
+      mlir::AffineMap map = mlir::AffineMap::get(dimCount, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+      builder.create<mlir::AffineStoreOp>(builder.getUnknownLoc(), valueToStore, mem, map, llvm::ArrayRef<mlir::Value>(operands));
+      storeOp.erase();
+    } else {
+      assert(false);
+    }
+  }
+  forOp.erase();
+  return newLoop;
+}
+
 
 }

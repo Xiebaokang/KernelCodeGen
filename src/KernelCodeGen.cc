@@ -93,6 +93,20 @@ mlir::ModuleOp& KernelCodeGenerator::optimize(ComputeDAG& graph_) {
           }
         }
       }
+    } else if (*opt == BatchMatmulOptimizer()) {
+      for (auto& batchMatmulConfig : batchMatmulConfigs) {
+        BatchMatmulOptimizer::batchMatmulConfig = batchMatmulConfig;
+        resetModule(module);
+        if (opt->applicable(module)) {
+          opt->applyOptimzer(module, builder);
+          // bestModule->dump();
+          auto curLatency = evaluate(module);
+          if (curLatency < minLatency) {
+            minLatency = curLatency;
+            saveBestModule(module);
+          }
+        }
+      }
     } else if (opt->applicable(module)) {
       opt->applyOptimzer(module, builder);
       auto curLatency = evaluate(module);

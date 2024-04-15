@@ -252,5 +252,36 @@ struct FMHAOptimizer : Optimizer {
   static std::map<std::string, int> fmhaConfig;
 };
 
+struct BatchMatmulOptimizer : Optimizer {
+
+  BatchMatmulOptimizer() {
+    this->name = std::move(std::string("BatchMatmul"));
+  }
+
+  virtual bool applicable(mlir::ModuleOp& module) override;
+  virtual void applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& builder) override;
+
+  mlir::AffineMap getAffineMap(const std::string& mapIdentifier, mlir::OpBuilder& builder);
+
+  std::vector<mlir::Value> threadLevelOneToTwo(mlir::AffineParallelOp pal);
+  void clear() {
+    batchMatmulBuffers.clear();
+    batchMatmuls.clear();
+    batchMatmulLoops.clear();
+  }
+
+  struct MemoryBuffer {
+    mlir::Value A;
+    mlir::Value B;
+    mlir::Value C;
+    BatchMatmulDescriptor matmul;
+  };
+
+  std::map<mlir::func::FuncOp, MemoryBuffer, CompareFunc> batchMatmulBuffers;
+  std::set<mlir::func::FuncOp, CompareFunc> batchMatmuls;
+  std::map<mlir::func::FuncOp, std::vector<mlir::AffineForOp>, CompareFunc> batchMatmulLoops;
+  static std::map<std::string, int> batchMatmulConfig;
+  
+};
 
 }

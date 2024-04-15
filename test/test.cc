@@ -5,12 +5,13 @@
 using namespace KernelCodeGen;
 
 
-void test_binary() {
+void test_operators() {
   KernelCodeGenerator generator("CUDA");
   auto graph = generator.createGraph("demo");
   generator.setLogMode(Log::Debug);
 
-  generator.opts.push_back(std::move(std::make_unique<MatmulOptimizer>()));
+  generator.opts.push_back(std::move(std::make_unique<BinaryOptimizer>()));
+  // generator.opts.push_back(std::move(std::make_unique<LayerNormOptimizer>()));
 
   // auto A = graph.create<PlaceHolder>(std::vector<int64_t>{16, 1024, 64}, std::string{"float32"});
   // int64_t axis = 0;
@@ -24,14 +25,18 @@ void test_binary() {
   // auto bias = graph.create<PlaceHolder>(std::vector<int64_t>{16, 1024, 64}, std::string{"float32"});
   // auto layernorm = graph.create<LayerNorm>(A, scale, bias, axis_, eps);
 
-  // auto A = graph.create<PlaceHolder>(std::vector<int64_t>{16, 2048, 64}, std::string{"float32"});
-  // auto B = graph.create<PlaceHolder>(std::vector<int64_t>{2048, 64}, std::string{"float32"});
-  // auto add = graph.create<Binary>(A, B, "add");
+  auto A = graph.create<PlaceHolder>(std::vector<int64_t>{2048, 1024}, std::string{"float32"});
+  auto B = graph.create<PlaceHolder>(std::vector<int64_t>{1024}, std::string{"float32"});
+  auto add = graph.create<Binary>(A, B, "Add");
 
-  int m = 4096, n = 2048, k = 1024;
-  auto A = graph.create<PlaceHolder>(std::vector<int64_t>{m, k}, std::string{"float32"});
-  auto B = graph.create<PlaceHolder>(std::vector<int64_t>{k, n}, std::string{"float32"});
-  auto C = graph.create<Matmul>(A, B);
+  // int m = 2048, n = 2048, k = 1024;
+  // auto A = graph.create<PlaceHolder>(std::vector<int64_t>{m, k}, std::string{"float32"});
+  // auto B = graph.create<PlaceHolder>(std::vector<int64_t>{k, n}, std::string{"float32"});
+  // auto C = graph.create<Matmul>(A, B);
+
+  // auto A = graph.create<PlaceHolder>(std::vector<int64_t>{8, 32, 2048, 64}, std::string{"float32"});
+  // auto B = graph.create<PlaceHolder>(std::vector<int64_t>{8, 32, 2048, 64}, std::string{"float32"});
+  // auto C = graph.create<BatchedMatmul>(A, Layout::rowMajor, B, Layout::colMajor);
 
   graph.dump();
   auto module = generator.optimize(graph);
@@ -50,7 +55,7 @@ void test_binary() {
 //   int m = 4096, n = 2048, k = 1024;
 //   auto A = graph.create<PlaceHolder>(std::vector<int64_t>{m, k}, std::string{"float32"});
 //   auto B = graph.create<PlaceHolder>(std::vector<int64_t>{k, n}, std::string{"float32"});
-//   auto C = graph.create<Matmul>(A, B, MemorySpace::global);
+//   auto C = graph.create<Matmul>(A, B);
 //   auto D = graph.create<Relu>(C, MemorySpace::inplace);
 
 //   graph.dump();
@@ -101,6 +106,7 @@ void test_flash_attention() {
   
   auto graph = generator.createGraph("flash_attn_demo");
   generator.setLogMode(Log::Debug);
+  // generator.opts.push_back(std::move(std::make_unique<FMHAOptimizer>()));
 
   int64_t hidden_dim = 2048L;
   int64_t total_token = 16 * 1024L;
@@ -111,13 +117,9 @@ void test_flash_attention() {
   int64_t head_num = hidden_dim / head_dim;
   
 
-  auto Q = graph.create<PlaceHolder>(std::vector<int64_t>{
-    batch_size, head_num, seq_len, head_dim}, std::string{"float32"});
-  auto K = graph.create<PlaceHolder>(std::vector<int64_t>{
-    batch_size, head_num, seq_len, head_dim}, std::string{"float32"});
-  
-  auto V = graph.create<PlaceHolder>(std::vector<int64_t>{
-    batch_size, head_num, seq_len, head_dim}, std::string{"float32"});
+  auto Q = graph.create<PlaceHolder>(std::vector<int64_t>{batch_size, head_num, seq_len, head_dim}, std::string{"float32"});
+  auto K = graph.create<PlaceHolder>(std::vector<int64_t>{batch_size, head_num, seq_len, head_dim}, std::string{"float32"});
+  auto V = graph.create<PlaceHolder>(std::vector<int64_t>{batch_size, head_num, seq_len, head_dim}, std::string{"float32"});
 
   auto S = graph.create<BatchedMatmul>(Q, Layout::rowMajor, K, Layout::colMajor);
   auto P = graph.create<Softmax>(S, -1, MemorySpace::inplace);
@@ -144,8 +146,7 @@ void test_flash_attention() {
 int main(int argc, char* argv[]) {
 
   // test_matmul();
-  test_binary();
-
+  test_operators();
   // test_flash_attention();
 
 }

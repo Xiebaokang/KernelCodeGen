@@ -268,6 +268,8 @@ struct Rewriter {
   
   static void deleteExtraCstOp(mlir::AffineParallelOp blockLevel);
 
+  static mlir::AffineForOp modifyLoopStepToOne(mlir::AffineForOp forOp);
+
 };
 
 }

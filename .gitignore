@@ -6,5 +6,6 @@ benchmark
 bin
 build
 doc/CodeDoc.md
+doc/pass.md
 test/matmul
 test/flash-attn
