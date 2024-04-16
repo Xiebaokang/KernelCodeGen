@@ -1239,6 +1239,8 @@ void Rewriter::schedule(mlir::Operation* srcOp, mlir::Operation* dstOp, Position
     case Position::begin: {
       if (auto forOp = mlir::dyn_cast<mlir::AffineParallelOp>(dstOp)) {
         srcOp->moveBefore(&(forOp.getBody()->getOperations().front()));
+      } else if (auto forOp = mlir::dyn_cast<mlir::AffineForOp>(dstOp)) {
+        srcOp->moveBefore(&(forOp.getBody()->getOperations().front()));
       } else {
         assert(false);
       }
@@ -2420,5 +2422,22 @@ mlir::AffineForOp Rewriter::modifyLoopStepToOne(mlir::AffineForOp forOp) {
   return newLoop;
 }
 
+std::vector<mlir::Value> Rewriter::blockLevelOneToTwo(mlir::AffineParallelOp pal, int64_t oneDimLen) {
+  mlir::OpBuilder builder(pal);
+  builder.setInsertionPointToStart(pal.getBody());
 
+  std::vector<mlir::AffineExpr> yExprs, xExprs;
+
+  auto threadIdx = getParallelIdx(pal);
+  auto dim0 = builder.getAffineDimExpr(0);
+  yExprs.push_back(dim0.floorDiv(oneDimLen));
+  auto y_map = mlir::AffineMap::get(1, 0, llvm::ArrayRef<mlir::AffineExpr>(yExprs), builder.getContext());
+  xExprs.push_back(dim0 % oneDimLen);
+  auto x_map = mlir::AffineMap::get(1, 0, llvm::ArrayRef<mlir::AffineExpr>(xExprs), builder.getContext());
+
+  auto threadIdxY = builder.create<mlir::AffineApplyOp>(builder.getUnknownLoc(), y_map, mlir::ValueRange({threadIdx[0]}));
+  auto threadIdxX = builder.create<mlir::AffineApplyOp>(builder.getUnknownLoc(), x_map, mlir::ValueRange({threadIdx[0]}));
+  std::vector<mlir::Value> result{threadIdxY, threadIdxX};
+  return result;
+}
 }

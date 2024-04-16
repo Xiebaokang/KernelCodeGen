@@ -10,25 +10,25 @@ void test_operators() {
   auto graph = generator.createGraph("demo");
   generator.setLogMode(Log::Debug);
 
-  generator.opts.push_back(std::move(std::make_unique<BinaryOptimizer>()));
-  // generator.opts.push_back(std::move(std::make_unique<LayerNormOptimizer>()));
+  // generator.opts.push_back(std::move(std::make_unique<BinaryOptimizer>()));
+  generator.opts.push_back(std::move(std::make_unique<LayerNormOptimizer>()));
   // generator.opts.push_back(std::move(std::make_unique<BatchMatmulOptimizer>()));
 
-  // auto A = graph.create<PlaceHolder>(std::vector<int64_t>{16, 1024, 64}, std::string{"float32"});
+  auto A = graph.create<PlaceHolder>(std::vector<int64_t>{16, 1024, 64}, std::string{"float32"});
   // int64_t axis = 0;
   // auto indices = graph.create<PlaceHolder>(std::vector<int64_t>{1}, std::string{"index"});
   // auto gather = graph.create<Gather>(A, indices, axis);
   // auto gelu = graph.create<ElementWise>(A, "gelu", MemorySpace::inplace);
 
-  // int64_t axis_ = 1;
-  // float eps=1e-5;
-  // auto scale = graph.create<PlaceHolder>(std::vector<int64_t>{16, 1024, 64}, std::string{"float32"});
-  // auto bias = graph.create<PlaceHolder>(std::vector<int64_t>{16, 1024, 64}, std::string{"float32"});
-  // auto layernorm = graph.create<LayerNorm>(A, scale, bias, axis_, eps);
+  int64_t axis_ = 1;
+  float eps=1e-5;
+  auto scale = graph.create<PlaceHolder>(std::vector<int64_t>{1024, 64}, std::string{"float32"});
+  auto bias = graph.create<PlaceHolder>(std::vector<int64_t>{1024, 64}, std::string{"float32"});
+  auto layernorm = graph.create<LayerNorm>(A, scale, bias, axis_, eps);
 
-  auto A = graph.create<PlaceHolder>(std::vector<int64_t>{16, 1, 1, 256}, std::string{"float32"});
-  auto B = graph.create<PlaceHolder>(std::vector<int64_t>{1, 128, 256}, std::string{"float32"});
-  graph.create<Binary>(A, B, "Add");
+  // auto A = graph.create<PlaceHolder>(std::vector<int64_t>{16, 1, 1, 256}, std::string{"float32"});
+  // auto B = graph.create<PlaceHolder>(std::vector<int64_t>{1, 128, 256}, std::string{"float32"});
+  // graph.create<Binary>(A, B, "Add");
 
   // int m = 2048, n = 2048, k = 1024;
   // auto A = graph.create<PlaceHolder>(std::vector<int64_t>{m, k}, std::string{"float32"});

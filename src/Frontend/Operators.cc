@@ -1076,6 +1076,8 @@ mlir::Value LayerNorm::build(ComputeDAG* graph, mlir::Value input, mlir::Value s
                                           int64_t axis, const float &eps, MemorySpace ms, const std::string& dtype_) {
   auto builder = graph->builder;
   auto type_input = input.getType();
+  auto scaleType = scale.getType();
+  auto biasType = bias.getType();
   llvm::ArrayRef<int64_t> input_shape;
   mlir::Type elementType;
   if(type_input.isa<mlir::MemRefType>()) {
@@ -1088,6 +1090,34 @@ mlir::Value LayerNorm::build(ComputeDAG* graph, mlir::Value input, mlir::Value s
   }
   auto dtype = dtype_ != ""  ? dtype_ : toStr(elementType);
   auto emType = getDType(builder, dtype);
+
+  auto scaleType_ = scaleType.dyn_cast<mlir::MemRefType>();
+  auto biasType_ = biasType.dyn_cast<mlir::MemRefType>();
+  auto scaleShape = scaleType_.getShape();
+  auto biasShape = biasType_.getShape();
+/*-----------------scale bias合法性检查------------------*/
+  bool hasOneDim = false;
+  for (int i=0; i<scaleShape.size(); i++) {
+    if (scaleShape[scaleShape.size()-1-i] != input_shape[input_shape.size()-1-i]) {
+      if (scaleShape[scaleShape.size()-1-i] != 1) {
+        llvm::errs() << "scale dim is not equal.\n";
+        return nullptr;
+      } else {
+        hasOneDim = true;
+      }
+    }
+  }
+  for (int i=0; i<biasShape.size(); i++) {
+    if (biasShape[biasShape.size()-1-i] != input_shape[input_shape.size()-1-i]) {
+      if (biasShape[biasShape.size()-1-i] != 1) {
+        llvm::errs() << "bias dim is not equal.\n";
+        return nullptr;
+      } else {
+        hasOneDim = true;
+      }
+    }
+  }
+
   /*----------------检查合法性，获取关键数据------------------*/
   int64_t dim = input_shape.size();
   if (axis >= dim || axis <= dim*-1) {  // 指定维度超出范围
@@ -1121,8 +1151,8 @@ mlir::Value LayerNorm::build(ComputeDAG* graph, mlir::Value input, mlir::Value s
   }
   funcName += "_axis_" + std::to_string(axis);
   /*----------------func返回值及参数列表-----------------*/
-  std::vector<mlir::Type> inputTypes({input.getType(), input.getType(), input.getType()});
-  std::vector<mlir::Type> outputTypes({input.getType()});
+  std::vector<mlir::Type> inputTypes({type_input, scaleType, biasType});
+  std::vector<mlir::Type> outputTypes({type_input});
   /*---------------建立funcop-------------------*/
   auto ip = builder.saveInsertionPoint();
   auto funcOp = buildFuction(graph->module, builder, funcName, inputTypes, outputTypes);
@@ -1186,9 +1216,23 @@ mlir::Value LayerNorm::build(ComputeDAG* graph, mlir::Value input, mlir::Value s
       mlir::buildAffineLoopNest(outNestedBuilder, outLoc, inLowerBounds, inUpperBounds, inSteps,
       [&](mlir::OpBuilder &inNestedBuilder, mlir::Location inLoc, mlir::ValueRange inIvs) {
         auto ivs = getIndexArgs(inIvs, outIvs);
+        mlir::SmallVector<mlir::Value> scaleIvs, biasIvs, tempIvs(ivs.begin(), ivs.end());
+        mlir::arith::ConstantOp zero;
+        if (hasOneDim)
+          zero = builder.create<mlir::arith::ConstantIndexOp>(builder.getUnknownLoc(), 0);
+        for (int i=0; i<scaleShape.size(); i++) {
+          if (scaleShape[scaleShape.size()-1-i] == input_shape[input_shape.size()-1-i])
+            scaleIvs.insert(scaleIvs.begin(), tempIvs[tempIvs.size()-1-i]);
+          else scaleIvs.insert(scaleIvs.begin(), zero);
+        }
+        for (int i=0; i<biasShape.size(); i++) {
+          if (biasShape[biasShape.size()-1-i] == input_shape[input_shape.size()-1-i])
+            biasIvs.insert(biasIvs.begin(), tempIvs[tempIvs.size()-1-i]);
+          else biasIvs.insert(biasIvs.begin(), zero);
+        }
         auto ldElem = inNestedBuilder.create<mlir::AffineLoadOp>(inNestedBuilder.getUnknownLoc(), output, mlir::ValueRange(ivs));
-        auto ldScale = inNestedBuilder.create<mlir::AffineLoadOp>(inNestedBuilder.getUnknownLoc(), operands[1], mlir::ValueRange(ivs));
-        auto ldBias = inNestedBuilder.create<mlir::AffineLoadOp>(inNestedBuilder.getUnknownLoc(), operands[2], mlir::ValueRange(ivs));
+        auto ldScale = inNestedBuilder.create<mlir::AffineLoadOp>(inNestedBuilder.getUnknownLoc(), operands[1], mlir::ValueRange(scaleIvs));
+        auto ldBias = inNestedBuilder.create<mlir::AffineLoadOp>(inNestedBuilder.getUnknownLoc(), operands[2], mlir::ValueRange(biasIvs));
         // auto mul = inNestedBuilder.create<mlir::arith::MulFOp>(inNestedBuilder.getUnknownLoc(), ldElem, div3);
         auto div = inNestedBuilder.create<mlir::arith::DivFOp>(inNestedBuilder.getUnknownLoc(), ldElem, sqrtOp);
         auto mul = inNestedBuilder.create<mlir::arith::MulFOp>(inNestedBuilder.getUnknownLoc(), ldScale, div);

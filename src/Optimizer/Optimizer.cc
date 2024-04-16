@@ -1327,13 +1327,12 @@ std::vector<mlir::AffineForOp> LayerNormOptimizer::read(mlir::AffineForOp forOp,
   for (auto& op : ops) {
     if (auto loadOp = mlir::dyn_cast<mlir::AffineLoadOp>(&op)){
       auto mem = loadOp.getMemRef();
-      if (mem == buffers[1]) {  // 收集从 buffers[1] 进行load的loadop，比如为input
+      if (mem == buffers[1]) {  // 收集从 buffers[1] 进行load的loadop，比如为input,scale bias
         targetLoadOps.push_back(loadOp);
       } 
     }
   }
-  auto map = targetLoadOps[0].getAffineMap();
-  auto indices = targetLoadOps[0].getIndices();
+
   std::vector<mlir::AffineForOp> loops;
   auto loopBody = [&](mlir::OpBuilder &builder, mlir::Location nestedLoc, mlir::Value iv, mlir::ValueRange iterArgs) {
     mlir::OpBuilder::InsertionGuard nestedGuard(builder);
@@ -1341,20 +1340,39 @@ std::vector<mlir::AffineForOp> LayerNormOptimizer::read(mlir::AffineForOp forOp,
   };
   mlir::OpBuilder builder(forOp);  // 创建在它的前面
   auto oneForOp = builder.create<mlir::AffineForOp>(builder.getUnknownLoc(), lb, ub, step, mlir::ValueRange({}), loopBody);
+
+  int64_t totalDim = 1;
+  auto shape = buffers[1].getType().dyn_cast<mlir::MemRefType>().getShape();
+  for (auto shape_ : shape) {totalDim *= shape_;}
+
+  auto map = targetLoadOps[0].getAffineMap();
+  auto indices = targetLoadOps[0].getIndices();
   builder.setInsertionPointToStart(oneForOp.getBody());
   llvm::SmallVector<mlir::Value> loadOperand;
   for (auto index : indices) {
     if (forOp.getInductionVar() == index) loadOperand.push_back(oneForOp.getInductionVar());
-    else loadOperand.push_back(index);
+    else {
+      auto indexOp = index.getDefiningOp();
+      if (mlir::dyn_cast<mlir::arith::ConstantIndexOp>(indexOp)) Rewriter::schedule(indexOp, forOp->getParentOp(), Position::begin);
+      loadOperand.push_back(index);
+    }
   }
+  for (auto op__ : loadOperand) {op__.print(llvm::outs()); llvm::outs() << "\n";}llvm::outs() << "\n";
   auto loadOp = builder.create<mlir::AffineLoadOp>(builder.getUnknownLoc(), buffers[1], map, loadOperand);
   auto storeMap = getAffineMap("PointLoadOrStore", builder);
-  llvm::SmallVector<mlir::Value> storeOperand({loadOperand[2], oneForOp.getInductionVar()});  // (threadidx, foriter)
-  auto storeOp = builder.create<mlir::AffineStoreOp>(builder.getUnknownLoc(), loadOp.getResult(), buffers[0], storeMap, storeOperand);
-  auto vecLoop = Rewriter::vectorize(oneForOp, layerNormConfig["VECTORIZE_WIDTH"]);
-  loops.push_back(vecLoop);
 
-  for (auto targetLoadOp : targetLoadOps) {
+  auto op = forOp->getParentOp()->getParentOp();
+  auto pal = mlir::dyn_cast<mlir::AffineParallelOp>(op);
+  auto threadIdx = Rewriter::getElementIdx(pal);
+  llvm::SmallVector<mlir::Value> storeOperand({threadIdx[0], oneForOp.getInductionVar()});
+
+  auto storeOp = builder.create<mlir::AffineStoreOp>(builder.getUnknownLoc(), loadOp.getResult(), buffers[0], storeMap, storeOperand);
+  mlir::AffineForOp firstLoop;
+  if (totalDim >= 4) firstLoop = Rewriter::vectorize(oneForOp, layerNormConfig["VECTORIZE_WIDTH"]);
+  else firstLoop = oneForOp;
+  loops.push_back(firstLoop);
+
+  for (auto targetLoadOp : targetLoadOps) {  // ceche read
     builder.setInsertionPointAfter(targetLoadOp);
     llvm::SmallVector<mlir::Value> loadOperand_({storeOperand[0], forOp.getInductionVar()});  // (threadidx, foriter)
     auto loadOp = builder.create<mlir::AffineLoadOp>(builder.getUnknownLoc(), buffers[0], storeMap, loadOperand_);
@@ -1829,6 +1847,7 @@ void LayerNormOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& 
     auto frontLoops1 = read(split_loops1[2], {tempArray, input}); // 从input取数存到shared，且进行向量化
     auto frontLoops2 = read(split_loops2[2], {tempArray, input});
     auto frontLoops3 = read(split_loops3[2], {tempArray, output});
+
     auto vecScaleLoop = read(split_loops3[2], {tempScaleArray, scale});
     auto vecBiasLoop = read(split_loops3[2], {tempBiasArray, bias});
     DUMP(module);
@@ -1896,6 +1915,7 @@ void LayerNormOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& 
     DUMP(module);
 
     Rewriter::deleteExtraCstOp(blockLevel);
+    DUMP(module);
   }
 }
 /*--------------------------------------------------------------------*/
@@ -2863,10 +2883,6 @@ bool BatchMatmulOptimizer::applicable(mlir::ModuleOp& module) {
   return res;
 }
 
-std::vector<mlir::Value> BatchMatmulOptimizer::threadLevelOneToTwo(mlir::AffineParallelOp pal) {
-
-}
-
 mlir::AffineMap BatchMatmulOptimizer::getAffineMap(const std::string& mapIdentifier, mlir::OpBuilder& builder) {
   auto dim0 = builder.getAffineDimExpr(0);
   auto dim1 = builder.getAffineDimExpr(1);
@@ -2889,29 +2905,35 @@ mlir::AffineMap BatchMatmulOptimizer::getAffineMap(const std::string& mapIdentif
     exprs.push_back(dim2+dim3.floorDiv(slice/width)+dim5*interval);
     exprs.push_back(dim4+(dim3%(slice/width))*width);
     return mlir::AffineMap::get(6, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
-  } else if (mapIdentifier == "two") {
+  } 
+  else if (mapIdentifier == "two") {
     std::vector<mlir::AffineExpr> exprs;
-    int interval = for_size/((for_size*slice/width)/for_size);
+    int interval = for_size/((for_size*slice/width)/block_size);  // block size is count of thread in per block.
     exprs.push_back(dim0);
     exprs.push_back(dim1);
     exprs.push_back(dim2+dim3.floorDiv(for_size/width)+dim5*interval);
     exprs.push_back(dim4+(dim3%(for_size/width))*width);
     return mlir::AffineMap::get(6, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
-  } else if (mapIdentifier == "three"){
+  } 
+  else if (mapIdentifier == "three"){
     std::vector<mlir::AffineExpr> exprs;
     int interval = block_size/((block_size*slice/width)/block_size);
-    exprs.push_back(dim0%(slice/width)*width+dim1);
-    exprs.push_back(dim0.floorDiv(slice/width)+dim3*interval);
+    exprs.push_back(dim0%(slice/width)*width+dim2);
+    exprs.push_back(dim0.floorDiv(slice/width)+dim1*interval);
     return mlir::AffineMap::get(3, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
-  } else if (mapIdentifier == "four"){
+  } 
+  else if (mapIdentifier == "four"){
     std::vector<mlir::AffineExpr> exprs;
-    exprs.push_back(dim0.floorDiv(for_size/width));
-    exprs.push_back(dim0 % (for_size/width)*dim1*width);
+    int interval = for_size/((for_size*slice/width)/block_size);
+    exprs.push_back(dim0.floorDiv(for_size/width)+dim1*interval);
+    exprs.push_back(dim0 % (for_size/width)*width);
     return mlir::AffineMap::get(2, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
-  } else if (mapIdentifier == "five"){
+  } 
+  else if (mapIdentifier == "five"){
     // std::vector<mlir::AffineExpr> exprs;
     // return mlir::AffineMap::get(6, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
-  } else if (mapIdentifier == "six"){
+  } 
+  else if (mapIdentifier == "six"){
     // std::vector<mlir::AffineExpr> exprs;
     // return mlir::AffineMap::get(6, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
   } else {
@@ -2971,7 +2993,7 @@ void BatchMatmulOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder
 
     auto elementA = A.getType().dyn_cast<mlir::MemRefType>().getElementType();
     auto elementB = B.getType().dyn_cast<mlir::MemRefType>().getElementType();
-    auto tileA = Rewriter::alloc_buffer(gridLevel, MemorySpace::local, {ldgASize}, elementA);  // reg8
+    auto tileA = Rewriter::alloc_buffer(gridLevel, MemorySpace::local, {ldgASize}, elementA);  // reg8 zhong zhuang
     auto tileB = Rewriter::alloc_buffer(gridLevel, MemorySpace::local, {ldgBSize}, elementB);  // reg4
 
     auto fragA = Rewriter::alloc_buffer(gridLevel, MemorySpace::local, {fragSize}, elementA);  // reg8
@@ -2981,27 +3003,22 @@ void BatchMatmulOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder
     auto smB = Rewriter::alloc_buffer(gridLevel, MemorySpace::shared, {batchMatmulConfig["BLOCK_SIZE_K"], batchMatmulConfig["FOR_SIZE_N"]}, elementB);
 
     auto loadTileAMap = getAffineMap("one", builder);
-    llvm::outs() << loadTileAMap << "\n";
     llvm::SmallVector<mlir::Value> operandsA({blockIdx[0], blockIdx[1], blockElemIdx[2], threadIdx[0], k_outer.getInductionVar()});
     auto loadTileA = Rewriter::read(A, tileA, loadTileAMap, operandsA, batchMatmulConfig["VECTORIZE_WIDTH"], k_outer, Position::begin);
-
     auto loadTileBMap = getAffineMap("two", builder);
-    llvm::outs() << loadTileBMap << "\n";
     llvm::SmallVector<mlir::Value> operandsB({blockIdx[0], blockIdx[1], k_outer.getInductionVar(), threadIdx[0], n_outer.getInductionVar()});
-    auto loadTileB = Rewriter::read(B, tileB, loadTileBMap, operandsB, batchMatmulConfig["VECTORIZE_WIDTH"], k_outer, Position::begin);
-
+    auto loadTileB = Rewriter::read(B, tileB, loadTileBMap, operandsB, batchMatmulConfig["VECTORIZE_WIDTH"], loadTileA, Position::after);
     DUMP(module);
 
     auto storeTileAMap = getAffineMap("three", builder);
-    auto storeTileA = Rewriter::write(tileA, smA, storeTileAMap, {threadIdx[0]}, 
-                        batchMatmulConfig["VECTORIZE_WIDTH"], loadTileB, Position::after);
+    auto storeTileA = Rewriter::write(tileA, smA, storeTileAMap, {threadIdx[0]}, batchMatmulConfig["VECTORIZE_WIDTH"], loadTileB, Position::after);
     auto storeTileBMap = getAffineMap("four", builder);
-    auto storeTileB = Rewriter::write(tileB, smB, storeTileBMap, {threadIdx[0]}, 
-                                batchMatmulConfig["VECTORIZE_WIDTH"], storeTileA, Position::after);
-    auto gpuBarrierPrefix = Rewriter::barrier(loadTileA, Position::before);
-    auto gpuBarrierSuffix = Rewriter::barrier(storeTileB, Position::after);
-
+    auto storeTileB = Rewriter::write(tileB, smB, storeTileBMap, {threadIdx[0]}, batchMatmulConfig["VECTORIZE_WIDTH"], storeTileA, Position::after);
+    auto gpuBarrierPrefix = Rewriter::barrier(storeTileB, Position::after);
     DUMP(module);
+
+    int64_t oneDimLen = sqrt(batchMatmulConfig["FOR_SIZE_N"]);
+    auto threadIdx_ =  Rewriter::blockLevelOneToTwo(blockLevel, oneDimLen);
 
     // auto loadFragAMap = getAffineMap("five", builder);
     // auto loadFragA = Rewriter::read(smA, fragA, loadFragAMap, {threadIdx[0], threadIdx[1], k_inner.getInductionVar()}, 

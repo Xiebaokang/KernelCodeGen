@@ -270,6 +270,8 @@ struct Rewriter {
 
   static mlir::AffineForOp modifyLoopStepToOne(mlir::AffineForOp forOp);
 
+  static std::vector<mlir::Value> blockLevelOneToTwo(mlir::AffineParallelOp pal, int64_t oneDimLen);
+
 };
 
 }
