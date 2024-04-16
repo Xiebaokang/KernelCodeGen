@@ -12,6 +12,7 @@ void test_operators() {
 
   generator.opts.push_back(std::move(std::make_unique<BinaryOptimizer>()));
   // generator.opts.push_back(std::move(std::make_unique<LayerNormOptimizer>()));
+  // generator.opts.push_back(std::move(std::make_unique<BatchMatmulOptimizer>()));
 
   // auto A = graph.create<PlaceHolder>(std::vector<int64_t>{16, 1024, 64}, std::string{"float32"});
   // int64_t axis = 0;
@@ -25,9 +26,9 @@ void test_operators() {
   // auto bias = graph.create<PlaceHolder>(std::vector<int64_t>{16, 1024, 64}, std::string{"float32"});
   // auto layernorm = graph.create<LayerNorm>(A, scale, bias, axis_, eps);
 
-  auto A = graph.create<PlaceHolder>(std::vector<int64_t>{2048, 1024}, std::string{"float32"});
-  auto B = graph.create<PlaceHolder>(std::vector<int64_t>{1024}, std::string{"float32"});
-  auto add = graph.create<Binary>(A, B, "Add");
+  auto A = graph.create<PlaceHolder>(std::vector<int64_t>{16, 1, 1, 256}, std::string{"float32"});
+  auto B = graph.create<PlaceHolder>(std::vector<int64_t>{1, 128, 256}, std::string{"float32"});
+  graph.create<Binary>(A, B, "Add");
 
   // int m = 2048, n = 2048, k = 1024;
   // auto A = graph.create<PlaceHolder>(std::vector<int64_t>{m, k}, std::string{"float32"});

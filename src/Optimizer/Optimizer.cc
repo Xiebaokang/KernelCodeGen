@@ -569,7 +569,6 @@ void MatmulOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& bui
   }
 }
 
-
 /*----------------------------binary---------------------------------*/
 
 std::vector<int64_t> getCreateAffineMapArgs(std::vector<mlir::AffineForOp> loops) {
@@ -611,30 +610,6 @@ bool BinaryOptimizer::applicable(mlir::ModuleOp& module) {
     binaryBuffers[binaryFunc] = ABC;
   }
   return res;
-  // clear();
-  // auto&& funcCalls = Analyzer::collectFuncCalls(module);
-  // for (auto funcCall : funcCalls) {
-  //   auto funcName = funcCall.getCallee().str();
-  //   if (funcName.find(std::string("Binary")) != std::string::npos) {
-  //     auto binaryFunc = Analyzer::getTargetFunction(module, funcName);
-  //     auto attr = binaryFunc->getAttr(std::string("func.state")).dyn_cast<mlir::StringAttr>();
-  //     if (attr.str() != std::string("cpu")) continue;
-  //     if (binarys.count(binaryFunc) != 0 || binaryLoops.count(binaryFunc) != 0 || binaryBuffers.count(binaryFunc) != 0) continue;
-      
-  //     binarys.insert(binaryFunc);
-  //     auto&& loops = Analyzer::collectFuncLoops(binaryFunc);
-  //     binaryLoops[binaryFunc] = std::move(loops);
-  //     MemoryBuffer buf;
-  //     auto binaryArgs = funcCall.getArgOperands();
-  //     buf.A = binaryArgs[0];
-  //     if (binaryArgs.size() == 2) { buf.B = binaryArgs[1]; }
-  //     else { buf.B = nullptr; }
-  //     buf.C = funcCall.getResult(0);
-  //     binaryBuffers[binaryFunc] = buf;
-  //   }
-  // }
-  // if (binarys.size()) return true;
-  // return false;
 }
 
 mlir::AffineMap BinaryOptimizer::getAffineMap(const std::string& mapIdentifier, mlir::OpBuilder& builder, 
@@ -796,14 +771,168 @@ llvm::SmallVector<mlir::Value> BinaryOptimizer::getMinLoadOperands(int dim, llvm
   return minOperands;
 }
 
+// void BinaryOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& builder) {
+//   for (auto binary : binarys) {
+//     auto loops = binaryLoops[binary];
+//     auto buffers = binaryBuffers[binary];
+//     auto max_load = buffers.A, min_load = buffers.B, result_store = buffers.C;
+
+//     auto extras = getCreateAffineMapArgs(loops);
+//     auto new_loops = Rewriter::combineToTowDim(loops);   // 
+//     extras.push_back(new_loops[1].getUpperBoundMap().getSingleConstantResult());
+//     auto dimY = new_loops[0].getUpperBoundMap().getSingleConstantResult();
+//     auto dimX = new_loops[1].getUpperBoundMap().getSingleConstantResult();
+
+//     DUMP(module);
+//     // 循环切块大小
+//     auto split_out_loops = Rewriter::split(new_loops[0], 3, {binaryConfig["THREAD_SIZE_M"], binaryConfig["BLOCK_SIZE_M"]});  // 第一个是一个thread计算的维度，第二个是一个block计算的多大的维度
+//     auto split_in_loops = Rewriter::split(new_loops[1], 3, {binaryConfig["THREAD_SIZE_N"], binaryConfig["BLOCK_SIZE_N"]});   // 
+//     DUMP(module);
+
+//     auto out_outer = split_out_loops[0], out_mider = split_out_loops[1], out_inner = split_out_loops[2];
+//     auto in_outer = split_in_loops[0], in_mider = split_in_loops[1], in_inner = split_in_loops[2];
+//     Rewriter::reorder({out_outer, in_outer, out_mider, in_mider, out_inner, in_inner});
+//     DUMP(module);
+
+//     auto gridLevel = Rewriter::parallel({out_outer, in_outer});
+//     auto blockLevel = Rewriter::parallel({out_mider, in_mider});
+//     DUMP(module);
+
+//     auto *op = gridLevel->getParentOp();
+//     auto funcOp = mlir::dyn_cast<mlir::func::FuncOp>(op);
+//     funcOp->setAttr(std::string("func.state"), builder.getStringAttr("gpu"));
+
+//     auto blockElemIdx = Rewriter::getElementIdx(gridLevel);
+//     auto ThreadElemIdx = Rewriter::getElementIdx(blockLevel);
+    
+//     if (dimX % binaryConfig["THREAD_SIZE_N"] || dimY % binaryConfig["THREAD_SIZE_M"]) {
+//       std::vector<int> range{dimY, dimX, binaryConfig["THREAD_SIZE_M"], binaryConfig["THREAD_SIZE_N"]};
+//       llvm::SmallVector<mlir::Value> operands{blockElemIdx[0], blockElemIdx[1], ThreadElemIdx[0], ThreadElemIdx[1]};  // by bx ty tx
+//       auto ifop = Rewriter::irregularMat(out_inner, range, operands);
+//       DUMP(module);
+//     } else {
+//       auto max_type = max_load.getType().dyn_cast<mlir::MemRefType>();
+//       auto element = max_type.getElementType();
+
+//       auto loadOrStoreMap = getAffineMap("MaxLoadOrStore", builder, extras);
+//       auto cacheLoadOrStore = getAffineMap("CacheLoadOrStore", builder);
+
+//       auto frag_a = Rewriter::alloc_buffer(/*parallelLevel*/blockLevel, MemorySpace::local, {binaryConfig["THREAD_SIZE_N"]}, element);  // 计算A -> reg
+//       auto frag_c = Rewriter::alloc_buffer(/*parallelLevel*/blockLevel, MemorySpace::local, {binaryConfig["THREAD_SIZE_N"]}, element);  // 计算c -> reg
+
+//       llvm::SmallVector<mlir::Value> operands{blockElemIdx[0], ThreadElemIdx[0], out_inner.getInductionVar(), blockElemIdx[1], ThreadElemIdx[1]};
+//       auto load_a = Rewriter::read(max_load, frag_a, loadOrStoreMap, operands, binaryConfig["VECTORIZE_WIDTH"], out_inner, Position::begin);
+//       auto store_c = Rewriter::write(frag_c, result_store, loadOrStoreMap, operands, binaryConfig["VECTORIZE_WIDTH"], in_inner, Position::after);
+//       DUMP(module);
+
+//       Rewriter::cache_read(in_inner, max_load, frag_a, cacheLoadOrStore, {in_inner.getInductionVar()});
+//       Rewriter::cache_write(in_inner, result_store, frag_c, cacheLoadOrStore, {in_inner.getInductionVar()});
+//       DUMP(module);
+
+//       BinaryOpData data;
+//       getBinaryOpData(max_load, min_load, data);   // 判断binary操作是什么类型的
+
+//       switch (data.type) {
+//         case BinaryType::constant: { //加常数（2，20，256） 1
+//           in_inner.walk<mlir::WalkOrder::PreOrder>([&](mlir::arith::ConstantOp cst) {
+//             Rewriter::schedule(cst, out_inner, Position::before);
+//           });
+//           break;
+//         }
+//         case BinaryType::allOne: { //全为1（2，20，256）（1, 1, 1）
+//           in_inner.walk<mlir::WalkOrder::PreOrder>([&](mlir::arith::ConstantOp cst) {
+//             Rewriter::schedule(cst, out_inner, Position::before);
+//           });
+//           in_inner.walk<mlir::WalkOrder::PreOrder>([&](mlir::AffineLoadOp loadOp) {
+//             if (loadOp.getMemref() == min_load){
+//               Rewriter::schedule(loadOp, out_inner, Position::before);
+//             }
+//           });
+//           break;
+//         }
+//         case BinaryType::allEqual: { // 维度相等，shape相等（2，20，256）（2，20，256） vcetorize all
+//           auto min_type = min_load.getType();
+//           auto element_ = min_type.dyn_cast<mlir::MemRefType>().getElementType();
+//           auto frag_b = Rewriter::alloc_buffer(/*parallelLevel*/blockLevel, MemorySpace::local, {binaryConfig["THREAD_SIZE_N"]}, element_);  // 计算b -> reg
+//           auto load_b = Rewriter::read(min_load, frag_b, loadOrStoreMap, operands, binaryConfig["VECTORIZE_WIDTH"], load_a, Position::after);
+//           Rewriter::cache_read(in_inner, min_load, frag_b, cacheLoadOrStore, {in_inner.getInductionVar()});
+//           break;
+//         }
+//         case BinaryType::hasOneOrder: { // 维度相等，shape不等，按顺序（2， 20， 256） （1， 20， 256） vcetorize all
+//           auto min_type = min_load.getType();
+//           auto element_ = min_type.dyn_cast<mlir::MemRefType>().getElementType();
+//           auto frag_b = Rewriter::alloc_buffer(/*parallelLevel*/blockLevel, MemorySpace::local, {binaryConfig["THREAD_SIZE_N"]}, element_);  // 计算b -> reg
+//           mlir::Value cst;
+//           in_inner.walk<mlir::WalkOrder::PreOrder>([&](mlir::arith::ConstantIndexOp cstOp) {
+//             Rewriter::schedule(cstOp, blockLevel, Position::begin);
+//             cst = cstOp.getResult();
+//           });
+//           auto minVectorLoad = getAffineMap("MinVectorLoad", builder, extras, data.needDimNums, data.oneDimNums);
+//           auto minOperands = getMinLoadOperands(extras[0], operands, cst);
+//           auto load_b = Rewriter::read(min_load, frag_b, minVectorLoad, minOperands, binaryConfig["VECTORIZE_WIDTH"], load_a, Position::after);
+//           Rewriter::cache_read(in_inner, min_load, frag_b, cacheLoadOrStore, {in_inner.getInductionVar()});
+//           break;
+//         }
+//         case BinaryType::noOneOrder: { // 维度不等/后续相等(2, 20, 256)  (20, 256) vcetorize all
+//           auto min_type = min_load.getType();
+//           auto element_ = min_type.dyn_cast<mlir::MemRefType>().getElementType();
+//           auto frag_b = Rewriter::alloc_buffer(/*parallelLevel*/blockLevel, MemorySpace::local, {binaryConfig["THREAD_SIZE_N"]}, element_);  // 计算b -> reg
+//           auto minVectorLoad = getAffineMap("MinVectorLoad", builder, extras, data.needDimNums, data.oneDimNums);
+//           auto minOperands = getMinLoadOperands(extras[0], operands);
+//           auto load_b = Rewriter::read(min_load, frag_b, minVectorLoad, minOperands, binaryConfig["VECTORIZE_WIDTH"], load_a, Position::after);
+//           Rewriter::cache_read(in_inner, min_load, frag_b, cacheLoadOrStore, {in_inner.getInductionVar()});
+//           break;
+//         }
+//         case BinaryType::hasOneUnorder: { // 维度不等/后续不等/后后续不等（2，20，256）（20，1） vcetorize max
+//           // auto min_type = min_load.getType();
+//           // auto element_ = min_type.dyn_cast<mlir::MemRefType>().getElementType();
+//           // auto noVectorLoadOrStore = getAffineMap("NoVectorLoadOrStore", builder, extras);
+//           // auto frag_b = Rewriter::alloc_buffer(/*parallelLevel*/blockLevel, MemorySpace::local, {binaryConfig["THREAD_SIZE_N"]}, element_);  // 计算b -> reg
+//           // auto load_b = Rewriter::noVcetorRead(min_load, frag_b, noVectorLoadOrStore, operands, load_a, Position::after);
+//           // Rewriter::cache_read(in_inner, min_load, frag_b, cacheLoadOrStore, {in_inner.getInductionVar()});
+//           in_inner.walk<mlir::WalkOrder::PreOrder>([&](mlir::arith::ConstantOp cst) {
+//             Rewriter::schedule(cst, out_inner, Position::before);
+//           });
+//           break;
+//         }
+//         default:
+//           assert(false);
+//       }
+//       DUMP(module); 
+//     }
+//     Rewriter::unroll(module, [&](mlir::AffineForOp forOp)->bool {
+//     if (!forOp.hasConstantBounds()) return false;  // 判断forop的上界和下界是否是已知量，这个可以直接手动去除循环结构
+//     auto step = forOp.getStep();
+//     auto ub = forOp.getConstantUpperBound();
+//     auto lb = forOp.getConstantLowerBound();
+//     auto times = (ub - lb) / step;
+//     // if (times >= std::min<int64_t>(64, 4)) return false;
+//     if (times >= 2) return false;
+//     return true;
+//     });
+//     DUMP(module);
+
+//     Rewriter::unrollAttribute(module, [&](mlir::AffineForOp forOp)->bool {   // 这种循环是可以添加pragma unroll的
+//     if (!forOp.hasConstantBounds()) return false;
+//     auto step = forOp.getStep();
+//     auto ub = forOp.getConstantUpperBound();
+//     auto lb = forOp.getConstantLowerBound();
+//     auto times = (ub - lb) / step;
+//     if (times > 64) return false;
+//     return true;
+//     });
+//     DUMP(module);
+//   }
+// }
+
 void BinaryOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& builder) {
   for (auto binary : binarys) {
     auto loops = binaryLoops[binary];
     auto buffers = binaryBuffers[binary];
-    auto max_load = buffers.A, min_load = buffers.B, result_store = buffers.C;
+    auto A = buffers.A, B = buffers.B, C = buffers.C;
 
     auto extras = getCreateAffineMapArgs(loops);
-    auto new_loops = Rewriter::combineToTowDim(loops);   // 
+    auto new_loops = Rewriter::combineToTowDim(loops);
     extras.push_back(new_loops[1].getUpperBoundMap().getSingleConstantResult());
     auto dimY = new_loops[0].getUpperBoundMap().getSingleConstantResult();
     auto dimX = new_loops[1].getUpperBoundMap().getSingleConstantResult();
@@ -823,9 +952,9 @@ void BinaryOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& bui
     auto blockLevel = Rewriter::parallel({out_mider, in_mider});
     DUMP(module);
 
-    auto *op = gridLevel->getParentOp();
-    auto funcOp = mlir::dyn_cast<mlir::func::FuncOp>(op);
-    funcOp->setAttr(std::string("func.state"), builder.getStringAttr("gpu"));
+    // auto *op = gridLevel->getParentOp();
+    // auto funcOp = mlir::dyn_cast<mlir::func::FuncOp>(op);
+    // funcOp->setAttr(std::string("func.state"), builder.getStringAttr("gpu"));
 
     auto blockElemIdx = Rewriter::getElementIdx(gridLevel);
     auto ThreadElemIdx = Rewriter::getElementIdx(blockLevel);
@@ -835,95 +964,6 @@ void BinaryOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& bui
       llvm::SmallVector<mlir::Value> operands{blockElemIdx[0], blockElemIdx[1], ThreadElemIdx[0], ThreadElemIdx[1]};  // by bx ty tx
       auto ifop = Rewriter::irregularMat(out_inner, range, operands);
       DUMP(module);
-    } else {
-      auto max_type = max_load.getType().dyn_cast<mlir::MemRefType>();
-      auto element = max_type.getElementType();
-
-      auto loadOrStoreMap = getAffineMap("MaxLoadOrStore", builder, extras);
-      auto cacheLoadOrStore = getAffineMap("CacheLoadOrStore", builder);
-
-      auto frag_a = Rewriter::alloc_buffer(/*parallelLevel*/blockLevel, MemorySpace::local, {binaryConfig["THREAD_SIZE_N"]}, element);  // 计算A -> reg
-      auto frag_c = Rewriter::alloc_buffer(/*parallelLevel*/blockLevel, MemorySpace::local, {binaryConfig["THREAD_SIZE_N"]}, element);  // 计算c -> reg
-
-      llvm::SmallVector<mlir::Value> operands{blockElemIdx[0], ThreadElemIdx[0], out_inner.getInductionVar(), blockElemIdx[1], ThreadElemIdx[1]};
-      auto load_a = Rewriter::read(max_load, frag_a, loadOrStoreMap, operands, binaryConfig["VECTORIZE_WIDTH"], out_inner, Position::begin);
-      auto store_c = Rewriter::write(frag_c, result_store, loadOrStoreMap, operands, binaryConfig["VECTORIZE_WIDTH"], in_inner, Position::after);
-      DUMP(module);
-
-      Rewriter::cache_read(in_inner, max_load, frag_a, cacheLoadOrStore, {in_inner.getInductionVar()});
-      Rewriter::cache_write(in_inner, result_store, frag_c, cacheLoadOrStore, {in_inner.getInductionVar()});
-      DUMP(module);
-
-      BinaryOpData data;
-      getBinaryOpData(max_load, min_load, data);   // 判断binary操作是什么类型的
-
-      switch (data.type) {
-        case BinaryType::constant: { //加常数（2，20，256） 1
-          in_inner.walk<mlir::WalkOrder::PreOrder>([&](mlir::arith::ConstantOp cst) {
-            Rewriter::schedule(cst, out_inner, Position::before);
-          });
-          break;
-        }
-        case BinaryType::allOne: { //全为1（2，20，256）（1, 1, 1）
-          in_inner.walk<mlir::WalkOrder::PreOrder>([&](mlir::arith::ConstantOp cst) {
-            Rewriter::schedule(cst, out_inner, Position::before);
-          });
-          in_inner.walk<mlir::WalkOrder::PreOrder>([&](mlir::AffineLoadOp loadOp) {
-            if (loadOp.getMemref() == min_load){
-              Rewriter::schedule(loadOp, out_inner, Position::before);
-            }
-          });
-          break;
-        }
-        case BinaryType::allEqual: { // 维度相等，shape相等（2，20，256）（2，20，256） vcetorize all
-          auto min_type = min_load.getType();
-          auto element_ = min_type.dyn_cast<mlir::MemRefType>().getElementType();
-          auto frag_b = Rewriter::alloc_buffer(/*parallelLevel*/blockLevel, MemorySpace::local, {binaryConfig["THREAD_SIZE_N"]}, element_);  // 计算b -> reg
-          auto load_b = Rewriter::read(min_load, frag_b, loadOrStoreMap, operands, binaryConfig["VECTORIZE_WIDTH"], load_a, Position::after);
-          Rewriter::cache_read(in_inner, min_load, frag_b, cacheLoadOrStore, {in_inner.getInductionVar()});
-          break;
-        }
-        case BinaryType::hasOneOrder: { // 维度相等，shape不等，按顺序（2， 20， 256） （1， 20， 256） vcetorize all
-          auto min_type = min_load.getType();
-          auto element_ = min_type.dyn_cast<mlir::MemRefType>().getElementType();
-          auto frag_b = Rewriter::alloc_buffer(/*parallelLevel*/blockLevel, MemorySpace::local, {binaryConfig["THREAD_SIZE_N"]}, element_);  // 计算b -> reg
-          mlir::Value cst;
-          in_inner.walk<mlir::WalkOrder::PreOrder>([&](mlir::arith::ConstantIndexOp cstOp) {
-            Rewriter::schedule(cstOp, blockLevel, Position::begin);
-            cst = cstOp.getResult();
-          });
-          auto minVectorLoad = getAffineMap("MinVectorLoad", builder, extras, data.needDimNums, data.oneDimNums);
-          auto minOperands = getMinLoadOperands(extras[0], operands, cst);
-          auto load_b = Rewriter::read(min_load, frag_b, minVectorLoad, minOperands, binaryConfig["VECTORIZE_WIDTH"], load_a, Position::after);
-          Rewriter::cache_read(in_inner, min_load, frag_b, cacheLoadOrStore, {in_inner.getInductionVar()});
-          break;
-        }
-        case BinaryType::noOneOrder: { // 维度不等/后续相等(2, 20, 256)  (20, 256) vcetorize all
-          auto min_type = min_load.getType();
-          auto element_ = min_type.dyn_cast<mlir::MemRefType>().getElementType();
-          auto frag_b = Rewriter::alloc_buffer(/*parallelLevel*/blockLevel, MemorySpace::local, {binaryConfig["THREAD_SIZE_N"]}, element_);  // 计算b -> reg
-          auto minVectorLoad = getAffineMap("MinVectorLoad", builder, extras, data.needDimNums, data.oneDimNums);
-          auto minOperands = getMinLoadOperands(extras[0], operands);
-          auto load_b = Rewriter::read(min_load, frag_b, minVectorLoad, minOperands, binaryConfig["VECTORIZE_WIDTH"], load_a, Position::after);
-          Rewriter::cache_read(in_inner, min_load, frag_b, cacheLoadOrStore, {in_inner.getInductionVar()});
-          break;
-        }
-        case BinaryType::hasOneUnorder: { // 维度不等/后续不等/后后续不等（2，20，256）（20，1） vcetorize max
-          // auto min_type = min_load.getType();
-          // auto element_ = min_type.dyn_cast<mlir::MemRefType>().getElementType();
-          // auto noVectorLoadOrStore = getAffineMap("NoVectorLoadOrStore", builder, extras);
-          // auto frag_b = Rewriter::alloc_buffer(/*parallelLevel*/blockLevel, MemorySpace::local, {binaryConfig["THREAD_SIZE_N"]}, element_);  // 计算b -> reg
-          // auto load_b = Rewriter::noVcetorRead(min_load, frag_b, noVectorLoadOrStore, operands, load_a, Position::after);
-          // Rewriter::cache_read(in_inner, min_load, frag_b, cacheLoadOrStore, {in_inner.getInductionVar()});
-          in_inner.walk<mlir::WalkOrder::PreOrder>([&](mlir::arith::ConstantOp cst) {
-            Rewriter::schedule(cst, out_inner, Position::before);
-          });
-          break;
-        }
-        default:
-          assert(false);
-      }
-      DUMP(module); 
     }
     Rewriter::unroll(module, [&](mlir::AffineForOp forOp)->bool {
     if (!forOp.hasConstantBounds()) return false;  // 判断forop的上界和下界是否是已知量，这个可以直接手动去除循环结构
@@ -2843,18 +2883,37 @@ mlir::AffineMap BatchMatmulOptimizer::getAffineMap(const std::string& mapIdentif
 
   if (mapIdentifier == "one") {
     std::vector<mlir::AffineExpr> exprs;
+    int interval = block_size/((block_size*slice/width)/block_size); // 128/(((128*8)/4)/128)
     exprs.push_back(dim0);
     exprs.push_back(dim1);
-    exprs.push_back(dim2*block_size+dim3.floorDiv(slice/width)+dim5*(block_size/2));
-    exprs.push_back(dim4*slice+(dim3%(slice/width))*4);
-    return mlir::AffineMap::get(5, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
-  } else if (mapIdentifier == "tow") {
+    exprs.push_back(dim2+dim3.floorDiv(slice/width)+dim5*interval);
+    exprs.push_back(dim4+(dim3%(slice/width))*width);
+    return mlir::AffineMap::get(6, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+  } else if (mapIdentifier == "two") {
     std::vector<mlir::AffineExpr> exprs;
+    int interval = for_size/((for_size*slice/width)/for_size);
     exprs.push_back(dim0);
     exprs.push_back(dim1);
-    exprs.push_back(dim2*slice+dim3.floorDiv(for_size/width));
-    exprs.push_back(dim4*for_size+(dim3%(for_size/width))*4);
-    return mlir::AffineMap::get(5, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+    exprs.push_back(dim2+dim3.floorDiv(for_size/width)+dim5*interval);
+    exprs.push_back(dim4+(dim3%(for_size/width))*width);
+    return mlir::AffineMap::get(6, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+  } else if (mapIdentifier == "three"){
+    std::vector<mlir::AffineExpr> exprs;
+    int interval = block_size/((block_size*slice/width)/block_size);
+    exprs.push_back(dim0%(slice/width)*width+dim1);
+    exprs.push_back(dim0.floorDiv(slice/width)+dim3*interval);
+    return mlir::AffineMap::get(3, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+  } else if (mapIdentifier == "four"){
+    std::vector<mlir::AffineExpr> exprs;
+    exprs.push_back(dim0.floorDiv(for_size/width));
+    exprs.push_back(dim0 % (for_size/width)*dim1*width);
+    return mlir::AffineMap::get(2, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+  } else if (mapIdentifier == "five"){
+    // std::vector<mlir::AffineExpr> exprs;
+    // return mlir::AffineMap::get(6, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+  } else if (mapIdentifier == "six"){
+    // std::vector<mlir::AffineExpr> exprs;
+    // return mlir::AffineMap::get(6, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
   } else {
     assert(false);
   }
@@ -2907,26 +2966,50 @@ void BatchMatmulOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder
     auto fragSize = batchMatmulConfig["Slice"];
 
     auto blockElemIdx = Rewriter::getElementIdx(gridLevel);
-    auto ThreadElemIdx = Rewriter::getElementIdx(blockLevel);
+    auto blockIdx = Rewriter::getParallelIdx(gridLevel);
+    auto threadIdx = Rewriter::getParallelIdx(blockLevel);
 
     auto elementA = A.getType().dyn_cast<mlir::MemRefType>().getElementType();
     auto elementB = B.getType().dyn_cast<mlir::MemRefType>().getElementType();
-    auto tileA = Rewriter::alloc_buffer(blockLevel, MemorySpace::local, {ldgASize}, elementA);  // reg4
-    auto tileB = Rewriter::alloc_buffer(blockLevel, MemorySpace::local, {ldgBSize}, elementB);
+    auto tileA = Rewriter::alloc_buffer(gridLevel, MemorySpace::local, {ldgASize}, elementA);  // reg8
+    auto tileB = Rewriter::alloc_buffer(gridLevel, MemorySpace::local, {ldgBSize}, elementB);  // reg4
 
-    auto fragA = Rewriter::alloc_buffer(blockLevel, MemorySpace::local, {fragSize}, elementA);  // reg8
-    auto fragB = Rewriter::alloc_buffer(blockLevel, MemorySpace::local, {fragSize}, elementB);
+    auto fragA = Rewriter::alloc_buffer(gridLevel, MemorySpace::local, {fragSize}, elementA);  // reg8
+    auto fragB = Rewriter::alloc_buffer(gridLevel, MemorySpace::local, {fragSize}, elementB);
 
     auto smA = Rewriter::alloc_buffer(gridLevel, MemorySpace::shared, {batchMatmulConfig["BLOCK_SIZE_K"], batchMatmulConfig["BLOCK_SIZE_M"]}, elementA);
     auto smB = Rewriter::alloc_buffer(gridLevel, MemorySpace::shared, {batchMatmulConfig["BLOCK_SIZE_K"], batchMatmulConfig["FOR_SIZE_N"]}, elementB);
 
-    // auto loadTileAMap = getAffineMap("one", builder);
-    // llvm::SmallVector<mlir::Value> operandsA({blockElemIdx[0], blockElemIdx[1], blockElemIdx[2], ThreadElemIdx[0], n_outer.getInductionVar()});
-    // auto loadTileA = Rewriter::read(A, tileA, loadTileAMap, operandsA, batchMatmulConfig["VECTORIZE_WIDTH"], n_inner, Position::before);
+    auto loadTileAMap = getAffineMap("one", builder);
+    llvm::outs() << loadTileAMap << "\n";
+    llvm::SmallVector<mlir::Value> operandsA({blockIdx[0], blockIdx[1], blockElemIdx[2], threadIdx[0], k_outer.getInductionVar()});
+    auto loadTileA = Rewriter::read(A, tileA, loadTileAMap, operandsA, batchMatmulConfig["VECTORIZE_WIDTH"], k_outer, Position::begin);
 
-    // auto loadTileBMap = getAffineMap("one", builder);
-    // llvm::SmallVector<mlir::Value> operandsB({blockElemIdx[0], blockElemIdx[1], blockElemIdx[2], ThreadElemIdx[0], n_outer.getInductionVar()});
-    // auto loadTileB = Rewriter::read(B, tileB, loadTileAMap, operandsB, batchMatmulConfig["VECTORIZE_WIDTH"], n_inner, Position::before);
+    auto loadTileBMap = getAffineMap("two", builder);
+    llvm::outs() << loadTileBMap << "\n";
+    llvm::SmallVector<mlir::Value> operandsB({blockIdx[0], blockIdx[1], k_outer.getInductionVar(), threadIdx[0], n_outer.getInductionVar()});
+    auto loadTileB = Rewriter::read(B, tileB, loadTileBMap, operandsB, batchMatmulConfig["VECTORIZE_WIDTH"], k_outer, Position::begin);
+
+    DUMP(module);
+
+    auto storeTileAMap = getAffineMap("three", builder);
+    auto storeTileA = Rewriter::write(tileA, smA, storeTileAMap, {threadIdx[0]}, 
+                        batchMatmulConfig["VECTORIZE_WIDTH"], loadTileB, Position::after);
+    auto storeTileBMap = getAffineMap("four", builder);
+    auto storeTileB = Rewriter::write(tileB, smB, storeTileBMap, {threadIdx[0]}, 
+                                batchMatmulConfig["VECTORIZE_WIDTH"], storeTileA, Position::after);
+    auto gpuBarrierPrefix = Rewriter::barrier(loadTileA, Position::before);
+    auto gpuBarrierSuffix = Rewriter::barrier(storeTileB, Position::after);
+
+    DUMP(module);
+
+    // auto loadFragAMap = getAffineMap("five", builder);
+    // auto loadFragA = Rewriter::read(smA, fragA, loadFragAMap, {threadIdx[0], threadIdx[1], k_inner.getInductionVar()}, 
+    //                   batchMatmulConfig["VECTORIZE_WIDTH"], k_inner, Position::begin);
+    // auto loadFragBMap = getAffineMap("six", builder);
+    // auto loadFragB = Rewriter::read(smB, fragB, loadFragBMap, {threadIdx[0], threadIdx[1], k_inner.getInductionVar()}, 
+    //                   batchMatmulConfig["VECTORIZE_WIDTH"], loadFragA, Position::after);
+    // DUMP(module);
 
   }
 }

@@ -611,6 +611,163 @@ std::map<std::string, std::function<mlir::Value(mlir::OpBuilder&, mlir::Value, m
   };
 /*-------------------------------------------------------------------------------------*/
 
+// mlir::Value Binary::build(ComputeDAG* graph, mlir::Value A, mlir::Value B, std::string operation, MemorySpace ms, const std::string& dtype_) {
+//   auto builder = graph->builder;
+//   auto typeA = A.getType();
+//   auto typeB = B.getType();
+
+//   llvm::ArrayRef<int64_t> input_shapeA, input_shapeB;
+//   mlir::Type elementType;
+//   if(typeA.isa<mlir::MemRefType>()) {
+//     auto shapeA = typeA.dyn_cast<mlir::MemRefType>();
+//     input_shapeA = shapeA.getShape();
+//     elementType = shapeA.getElementType();
+//   }
+//   else {
+//     llvm::errs() << "Type of left operand of" << operation << "is not Memref.\n";
+//     return nullptr;
+//   }
+//   auto dtype = dtype_ != ""  ? dtype_ : toStr(elementType);
+//   auto emType = getDType(builder, dtype);
+
+//   if(typeB.isa<mlir::MemRefType>()) {
+//     auto shapeB = typeB.dyn_cast<mlir::MemRefType>();
+//     input_shapeB = shapeB.getShape();
+//   }
+//   else {
+//     llvm::errs() << "Type of right operand of " << operation << " is not Memref.\n";
+//     return nullptr;
+//   }
+
+//   size_t max_dim, min_dim;
+//   mlir::Value max_tensor, min_tensor;
+//   std::vector<int> oneDimIndexs;
+//   mlir::Value temp_tensor = nullptr;
+//   std::vector<int64_t> max_shape, min_shape;
+//   if (input_shapeA.size() > input_shapeB.size()) {  // A dim > B dim
+//     max_tensor = A; min_tensor = B;
+//     max_shape = std::vector<int64_t>(input_shapeA);
+//     min_shape = std::vector<int64_t>(input_shapeB);
+//   } else if (input_shapeA.size() < input_shapeB.size()) {  // B dim > A dim
+//     max_tensor = B; min_tensor = A;
+//     max_shape = std::vector<int64_t>(input_shapeB);
+//     min_shape = std::vector<int64_t>(input_shapeA);
+//   } else {   // A dim == B dim
+//     for (int i=0; i<input_shapeA.size(); i++) {
+//       if (input_shapeA[i] != input_shapeB[i]) {
+//         if (input_shapeA[i] != 1 && input_shapeB[i] != 1) {
+//           llvm::errs() << "A-dim is not equal to B-dim and Can't apply " << operation << " Operation due to imcompatible "<< i <<"-dim.\n";
+//           return nullptr;
+//         } else {
+//           oneDimIndexs.push_back(i);
+//           if (input_shapeA[i] == 1) {
+//             if (temp_tensor && temp_tensor != A) {
+//               llvm::errs() << "A-dim is not equal to B-dim and Can't apply " << operation << " Operation due to imcompatible "<< i <<"-dim.\n";
+//               return nullptr;
+//             } else temp_tensor = A;
+//           } else {
+//             if (temp_tensor && temp_tensor != B) {
+//               llvm::errs() << "A-dim is not equal to B-dim and Can't apply " << operation << " Operation due to imcompatible "<< i <<"-dim.\n";
+//               return nullptr;
+//             } else temp_tensor = B;
+//           }
+//         }
+//       }
+//     }
+//     if (temp_tensor) {
+//       if (temp_tensor == A){
+//         max_tensor = B; min_tensor = A;
+//         max_shape = std::vector<int64_t>(input_shapeB);
+//         min_shape = std::vector<int64_t>(input_shapeA);
+//       } else {
+//         max_tensor = A; min_tensor = B;
+//         max_shape = std::vector<int64_t>(input_shapeA);
+//         min_shape = std::vector<int64_t>(input_shapeB);
+//       }
+//     } else {
+//       max_tensor = A; min_tensor = B;
+//       max_shape = std::vector<int64_t>(input_shapeA);
+//       min_shape = std::vector<int64_t>(input_shapeB);
+//     }
+//   }
+//   max_dim = max_shape.size();
+//   min_dim = min_shape.size();
+//   if (max_dim != min_dim){
+//     int mo = max_dim - min_dim;
+//     for (int i=0; i<min_dim; i++) {
+//       if (max_shape[i + mo] != min_shape[i]) {
+//         if (min_shape[i] != 1) {
+//           llvm::errs() << "A-dim is not equal to B-dim and Can't apply " << operation << " Operation due to imcompatible "<< i <<"-dim.\n";
+//           return nullptr;          
+//         } else
+//           oneDimIndexs.push_back(i + mo);
+//       }
+//     }
+//   }
+
+//   auto funcName = std::string({operation + "_Binary"});
+
+//   for (auto dim : max_shape) {
+//     funcName += "_" + std::to_string(dim);
+//   }
+//   funcName += "_" + operation;
+
+//   for (auto dim : min_shape) {
+//     funcName += "_" + std::to_string(dim);
+//   }
+
+//   auto ip = builder.saveInsertionPoint();
+//   auto funcOp = buildFuction(graph->module, builder, funcName, {max_tensor.getType(), min_tensor.getType()}, {max_tensor.getType()});
+  
+//   auto& bodyBlock = funcOp.front();
+
+//   if (bodyBlock.getOperations().size() > 0) {
+//     auto callOp = builder.create<mlir::func::CallOp>(builder.getUnknownLoc(), funcOp, mlir::ValueRange({max_tensor, min_tensor}));
+//     funcOp->setAttr(std::string("func.state"), builder.getStringAttr("cpu"));
+//     return callOp.getResult(0);
+//   } 
+
+//   builder.setInsertionPointToStart(&bodyBlock);
+//   mlir::ValueRange operands = bodyBlock.getArguments();  // 参数
+//   mlir::Value output;
+//   if (ms != MemorySpace::inplace) {
+//     auto typeC = mlir::MemRefType::get(max_shape, emType, {}, static_cast<int>(ms));
+//     auto allocOp = builder.create<mlir::memref::AllocOp>(builder.getUnknownLoc(), typeC);
+//     output = allocOp.getResult();
+//   } else {
+//     output = operands[0];
+//   }
+
+//   mlir::SmallVector<int64_t> lowerBounds(max_dim, /*Value=*/0);
+//   mlir::SmallVector<int64_t> steps(max_dim, /*Value=*/1);
+//   mlir::SmallVector<int64_t> upperBounds(max_shape.begin(), max_shape.end());
+//   mlir::buildAffineLoopNest(builder, builder.getUnknownLoc(), lowerBounds, upperBounds, steps,
+//     [&](mlir::OpBuilder &nestedBuilder, mlir::Location loc, mlir::ValueRange ivs) {
+//       mlir::SmallVector<mlir::Value> min_ivs;
+//       if (oneDimIndexs.size()) {
+//         auto one = builder.create<mlir::arith::ConstantIndexOp>(builder.getUnknownLoc(), 0);
+//         for (int i=max_dim-min_dim; i<ivs.size(); i++) {
+//           if (std::find(oneDimIndexs.begin(), oneDimIndexs.end(), i) != oneDimIndexs.end())
+//             min_ivs.push_back(one);
+//           else 
+//             min_ivs.push_back(ivs[i]);
+//         }
+//       } else {
+//         min_ivs = mlir::SmallVector<mlir::Value>(ivs.take_back(min_dim));
+//       }
+//       auto ld_max = nestedBuilder.create<mlir::AffineLoadOp>(nestedBuilder.getUnknownLoc(), operands[0], mlir::ValueRange(ivs));
+//       auto ld_min = nestedBuilder.create<mlir::AffineLoadOp>(nestedBuilder.getUnknownLoc(), operands[1], mlir::ValueRange(min_ivs));
+//       auto result = operationMap[operation](nestedBuilder, ld_max, ld_min);
+//       nestedBuilder.create<mlir::AffineStoreOp>(nestedBuilder.getUnknownLoc(), result, output, mlir::ValueRange(ivs));
+//     }
+//   );
+//   builder.create<mlir::func::ReturnOp>(builder.getUnknownLoc(), output);
+//   builder.restoreInsertionPoint(ip);
+//   auto callOp = builder.create<mlir::func::CallOp>(builder.getUnknownLoc(), funcOp, mlir::ValueRange({max_tensor, min_tensor}));
+//   funcOp->setAttr(std::string("func.state"), builder.getStringAttr("cpu"));
+//   return callOp.getResult(0);
+// }
+
 mlir::Value Binary::build(ComputeDAG* graph, mlir::Value A, mlir::Value B, std::string operation, MemorySpace ms, const std::string& dtype_) {
   auto builder = graph->builder;
   auto typeA = A.getType();
@@ -639,90 +796,48 @@ mlir::Value Binary::build(ComputeDAG* graph, mlir::Value A, mlir::Value B, std::
     return nullptr;
   }
 
-  size_t max_dim, min_dim;
-  mlir::Value max_tensor, min_tensor;
-  std::vector<int> oneDimIndexs;
-  mlir::Value temp_tensor = nullptr;
-  std::vector<int64_t> max_shape, min_shape;
-  if (input_shapeA.size() > input_shapeB.size()) {  // A dim > B dim
-    max_tensor = A; min_tensor = B;
-    max_shape = std::vector<int64_t>(input_shapeA);
-    min_shape = std::vector<int64_t>(input_shapeB);
-  } else if (input_shapeA.size() < input_shapeB.size()) {  // B dim > A dim
-    max_tensor = B; min_tensor = A;
-    max_shape = std::vector<int64_t>(input_shapeB);
-    min_shape = std::vector<int64_t>(input_shapeA);
-  } else {   // A dim == B dim
-    for (int i=0; i<input_shapeA.size(); i++) {
-      if (input_shapeA[i] != input_shapeB[i]) {
-        if (input_shapeA[i] != 1 && input_shapeB[i] != 1) {
-          llvm::errs() << "A-dim is not equal to B-dim and Can't apply " << operation << " Operation due to imcompatible "<< i <<"-dim.\n";
-          return nullptr;
-        } else {
-          oneDimIndexs.push_back(i);
-          if (input_shapeA[i] == 1) {
-            if (temp_tensor && temp_tensor != A) {
-              llvm::errs() << "A-dim is not equal to B-dim and Can't apply " << operation << " Operation due to imcompatible "<< i <<"-dim.\n";
-              return nullptr;
-            } else temp_tensor = A;
-          } else {
-            if (temp_tensor && temp_tensor != B) {
-              llvm::errs() << "A-dim is not equal to B-dim and Can't apply " << operation << " Operation due to imcompatible "<< i <<"-dim.\n";
-              return nullptr;
-            } else temp_tensor = B;
-          }
-        }
-      }
-    }
-    if (temp_tensor) {
-      if (temp_tensor == A){
-        max_tensor = B; min_tensor = A;
-        max_shape = std::vector<int64_t>(input_shapeB);
-        min_shape = std::vector<int64_t>(input_shapeA);
-      } else {
-        max_tensor = A; min_tensor = B;
-        max_shape = std::vector<int64_t>(input_shapeA);
-        min_shape = std::vector<int64_t>(input_shapeB);
+  std::vector<int64_t> shapeA(input_shapeA.begin(), input_shapeA.end());
+  std::vector<int64_t> shapeB(input_shapeB.begin(), input_shapeB.end());
+  int minDim = shapeA.size() <= shapeB.size() ? shapeA.size() : shapeB.size();
+  int maxDim = shapeA.size() >= shapeB.size() ? shapeA.size() : shapeB.size();
+  bool AIsMax = shapeA.size() >= shapeB.size() ? true : false;
+  std::reverse(shapeA.begin(), shapeA.end());
+  std::reverse(shapeB.begin(), shapeB.end());
+  bool hasOneDim = false;
+  std::vector<int64_t> newShape;
+  for (int i=0; i<minDim; i++) {
+    if (shapeA[i] != shapeB[i]){
+      if (shapeA[i] != 1 && shapeB[i] != 1) {llvm::errs() << "dim not equal" <<"\n"; return nullptr;}
+      else {
+        hasOneDim = true;
+        if (shapeA[i] == 1) newShape.push_back(shapeB[i]);
+        else newShape.push_back(shapeA[i]);
       }
     } else {
-      max_tensor = A; min_tensor = B;
-      max_shape = std::vector<int64_t>(input_shapeA);
-      min_shape = std::vector<int64_t>(input_shapeB);
+      newShape.push_back(shapeA[i]);
     }
   }
-  max_dim = max_shape.size();
-  min_dim = min_shape.size();
-  if (max_dim != min_dim){
-    int mo = max_dim - min_dim;
-    for (int i=0; i<min_dim; i++) {
-      if (max_shape[i + mo] != min_shape[i]) {
-        if (min_shape[i] != 1) {
-          llvm::errs() << "A-dim is not equal to B-dim and Can't apply " << operation << " Operation due to imcompatible "<< i <<"-dim.\n";
-          return nullptr;          
-        } else
-          oneDimIndexs.push_back(i + mo);
-      }
-    }
-  }
+  if (AIsMax) newShape.insert(newShape.end(), shapeA.begin()+minDim, shapeA.end());
+  else newShape.insert(newShape.end(), shapeB.begin()+minDim, shapeB.end());
+  std::reverse(newShape.begin(), newShape.end());
 
   auto funcName = std::string({operation + "_Binary"});
-
-  for (auto dim : max_shape) {
-    funcName += "_" + std::to_string(dim);
+  for (int i=shapeA.size()-1; i >=0; i--) {
+    funcName += "_" + std::to_string(shapeA[i]);
   }
   funcName += "_" + operation;
-
-  for (auto dim : min_shape) {
-    funcName += "_" + std::to_string(dim);
+  for (int i=shapeB.size()-1; i >=0; i--) {
+    funcName += "_" + std::to_string(shapeB[i]);
   }
 
   auto ip = builder.saveInsertionPoint();
-  auto funcOp = buildFuction(graph->module, builder, funcName, {max_tensor.getType(), min_tensor.getType()}, {max_tensor.getType()});
+  auto typeC = mlir::MemRefType::get(newShape, emType, {}, static_cast<int>(ms));
+  auto funcOp = buildFuction(graph->module, builder, funcName, {A.getType(), B.getType()}, {typeC});
   
   auto& bodyBlock = funcOp.front();
 
   if (bodyBlock.getOperations().size() > 0) {
-    auto callOp = builder.create<mlir::func::CallOp>(builder.getUnknownLoc(), funcOp, mlir::ValueRange({max_tensor, min_tensor}));
+    auto callOp = builder.create<mlir::func::CallOp>(builder.getUnknownLoc(), funcOp, mlir::ValueRange({A, B}));
     funcOp->setAttr(std::string("func.state"), builder.getStringAttr("cpu"));
     return callOp.getResult(0);
   } 
@@ -731,39 +846,43 @@ mlir::Value Binary::build(ComputeDAG* graph, mlir::Value A, mlir::Value B, std::
   mlir::ValueRange operands = bodyBlock.getArguments();  // 参数
   mlir::Value output;
   if (ms != MemorySpace::inplace) {
-    auto typeC = mlir::MemRefType::get(max_shape, emType, {}, static_cast<int>(ms));
     auto allocOp = builder.create<mlir::memref::AllocOp>(builder.getUnknownLoc(), typeC);
     output = allocOp.getResult();
   } else {
     output = operands[0];
   }
 
-  mlir::SmallVector<int64_t> lowerBounds(max_dim, /*Value=*/0);
-  mlir::SmallVector<int64_t> steps(max_dim, /*Value=*/1);
-  mlir::SmallVector<int64_t> upperBounds(max_shape.begin(), max_shape.end());
+  mlir::SmallVector<int64_t> lowerBounds(maxDim, /*Value=*/0);
+  mlir::SmallVector<int64_t> steps(maxDim, /*Value=*/1);
+  mlir::SmallVector<int64_t> upperBounds(newShape.begin(), newShape.end());
   mlir::buildAffineLoopNest(builder, builder.getUnknownLoc(), lowerBounds, upperBounds, steps,
     [&](mlir::OpBuilder &nestedBuilder, mlir::Location loc, mlir::ValueRange ivs) {
-      mlir::SmallVector<mlir::Value> min_ivs;
-      if (oneDimIndexs.size()) {
-        auto one = builder.create<mlir::arith::ConstantIndexOp>(builder.getUnknownLoc(), 0);
-        for (int i=max_dim-min_dim; i<ivs.size(); i++) {
-          if (std::find(oneDimIndexs.begin(), oneDimIndexs.end(), i) != oneDimIndexs.end())
-            min_ivs.push_back(one);
-          else 
-            min_ivs.push_back(ivs[i]);
-        }
-      } else {
-        min_ivs = mlir::SmallVector<mlir::Value>(ivs.take_back(min_dim));
+      mlir::SmallVector<mlir::Value> tempIvs(ivs.begin(), ivs.end());
+      mlir::SmallVector<mlir::Value> aIvs, bIvs;
+      std::reverse(tempIvs.begin(), tempIvs.end());
+      std::reverse(newShape.begin(), newShape.end());
+      mlir::arith::ConstantOp zero;
+      if (hasOneDim)
+        zero = builder.create<mlir::arith::ConstantIndexOp>(builder.getUnknownLoc(), 0);
+      for (int i=0; i<shapeA.size(); i++) {
+        if (shapeA[i] == newShape[i])  aIvs.push_back(tempIvs[i]);
+        else aIvs.push_back(zero);
       }
-      auto ld_max = nestedBuilder.create<mlir::AffineLoadOp>(nestedBuilder.getUnknownLoc(), operands[0], mlir::ValueRange(ivs));
-      auto ld_min = nestedBuilder.create<mlir::AffineLoadOp>(nestedBuilder.getUnknownLoc(), operands[1], mlir::ValueRange(min_ivs));
-      auto result = operationMap[operation](nestedBuilder, ld_max, ld_min);
+      for (int i=0; i<shapeB.size(); i++) {
+        if (shapeB[i] == newShape[i])  bIvs.push_back(tempIvs[i]);
+        else bIvs.push_back(zero);
+      }
+      std::reverse(aIvs.begin(), aIvs.end());
+      std::reverse(bIvs.begin(), bIvs.end());
+      auto ld_a = nestedBuilder.create<mlir::AffineLoadOp>(nestedBuilder.getUnknownLoc(), operands[0], mlir::ValueRange(aIvs));
+      auto ld_b = nestedBuilder.create<mlir::AffineLoadOp>(nestedBuilder.getUnknownLoc(), operands[1], mlir::ValueRange(bIvs));
+      auto result = operationMap[operation](nestedBuilder, ld_a, ld_b);
       nestedBuilder.create<mlir::AffineStoreOp>(nestedBuilder.getUnknownLoc(), result, output, mlir::ValueRange(ivs));
     }
   );
   builder.create<mlir::func::ReturnOp>(builder.getUnknownLoc(), output);
   builder.restoreInsertionPoint(ip);
-  auto callOp = builder.create<mlir::func::CallOp>(builder.getUnknownLoc(), funcOp, mlir::ValueRange({max_tensor, min_tensor}));
+  auto callOp = builder.create<mlir::func::CallOp>(builder.getUnknownLoc(), funcOp, mlir::ValueRange({A, B}));
   funcOp->setAttr(std::string("func.state"), builder.getStringAttr("cpu"));
   return callOp.getResult(0);
 }
