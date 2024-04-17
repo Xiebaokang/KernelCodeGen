@@ -1913,8 +1913,23 @@ std::vector<mlir::AffineForOp> Rewriter::combineToTowDim(std::vector<mlir::Affin
       break;
     }
   }
-
+  /*遇到不需要改变的forop，且含有memrefloadop，需要添加affineapplyOp*/
   if (loops.size() == 2 && originUps[0] == combineUps[0] && originUps[1] == combineUps[1]) {
+    std::vector<mlir::memref::LoadOp> memLoadOps;
+    loops[0].walk<mlir::WalkOrder::PostOrder>([&](mlir::memref::LoadOp memrefLoadOp) {
+      mlir::OpBuilder builder(memrefLoadOp);
+      auto operands = memrefLoadOp.getIndices();
+      for (auto operand : operands) {
+        auto it = std::find(oldIvs.begin(), oldIvs.end(), operand);
+        if (it != oldIvs.end()) {
+          auto dim0 = builder.getAffineDimExpr(0);
+          int index = std::distance(oldIvs.begin(), it);
+          auto map = mlir::AffineMap::get(1, 0, llvm::ArrayRef<mlir::AffineExpr>({dim0}), builder.getContext());
+          auto applyOp = builder.create<mlir::AffineApplyOp>(builder.getUnknownLoc(), map, mlir::ValueRange({oldIvs[index]}));
+          replaceOperands(memrefLoadOp, operand, applyOp.getResult());
+        }
+      }
+    });
     return loops;
   }
 
@@ -1994,7 +2009,6 @@ std::vector<mlir::AffineForOp> Rewriter::combineToTowDim(std::vector<mlir::Affin
           replaceOperands(memrefLoadOp, operand, applyOp.getResult());
         }
       }
-
     }else {
       assert(false);
     }
@@ -2327,8 +2341,7 @@ void Rewriter::deleteExtraCstOp(mlir::AffineParallelOp blockLevel) {
 
 
   mlir::OpBuilder builder(blockLevel);
-  builder.setInsertionPointAfter(&(blockLevel.getBody()->getOperations().front()));
-
+  builder.setInsertionPointToStart(blockLevel.getBody());
   std::map<int, mlir::arith::ConstantOp> IndexMap; 
   for (int i=0; i<cstIndexOps.size(); i++) {
     int val = cstIndexOps[i].value();
@@ -2342,21 +2355,7 @@ void Rewriter::deleteExtraCstOp(mlir::AffineParallelOp blockLevel) {
     cstIndexOp.getResult().replaceAllUsesWith(IndexMap[val].getResult());
     cstIndexOp.erase();
   }
-
-  std::map<int, mlir::arith::ConstantOp> intMap; 
-  for (int i=0; i<cstIntOps.size(); i++) {
-    auto val = cstIntOps[i].value();
-    if (intMap.find(val) == intMap.end()) {
-      auto cst = builder.create<mlir::arith::ConstantOp>(builder.getUnknownLoc(), builder.getIntegerAttr(builder.getIntegerType(32), val));
-      intMap[val] = cst;
-    }
-  }
-  for (auto cstIntOp : cstIntOps) {
-    auto val = cstIntOp.value();
-    cstIntOp.getResult().replaceAllUsesWith(intMap[val].getResult());
-    cstIntOp.erase();
-  }
-  
+  builder.setInsertionPointToStart(blockLevel.getBody());
   std::map<float, mlir::arith::ConstantOp> flaotMap; 
   for (int i=0; i<cstFloatOps.size(); i++) {
     auto val = cstFloatOps[i].value().convertToFloat();
@@ -2369,6 +2368,20 @@ void Rewriter::deleteExtraCstOp(mlir::AffineParallelOp blockLevel) {
     auto val = cstFloatOp.value().convertToFloat();
     cstFloatOp.getResult().replaceAllUsesWith(flaotMap[val].getResult());
     cstFloatOp.erase();
+  }
+  builder.setInsertionPointToStart(blockLevel.getBody());
+  std::map<int, mlir::arith::ConstantOp> intMap; 
+  for (int i=0; i<cstIntOps.size(); i++) {
+    auto val = cstIntOps[i].value();
+    if (intMap.find(val) == intMap.end()) {
+      auto cst = builder.create<mlir::arith::ConstantOp>(builder.getUnknownLoc(), builder.getIntegerAttr(builder.getIntegerType(32), val));
+      intMap[val] = cst;
+    }
+  }
+  for (auto cstIntOp : cstIntOps) {
+    auto val = cstIntOp.value();
+    cstIntOp.getResult().replaceAllUsesWith(intMap[val].getResult());
+    cstIntOp.erase();
   }
 
 }

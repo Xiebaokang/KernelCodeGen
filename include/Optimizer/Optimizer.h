@@ -261,7 +261,7 @@ struct BatchMatmulOptimizer : Optimizer {
   virtual bool applicable(mlir::ModuleOp& module) override;
   virtual void applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& builder) override;
 
-  mlir::AffineMap getAffineMap(const std::string& mapIdentifier, mlir::OpBuilder& builder);
+  mlir::AffineMap getAffineMap(const std::string& mapIdentifier, mlir::OpBuilder& builder, const int64_t batchNum=0);
 
   std::vector<mlir::Value> threadLevelOneToTwo(mlir::AffineParallelOp pal);
   void clear() {

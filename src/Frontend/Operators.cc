@@ -1095,7 +1095,7 @@ mlir::Value LayerNorm::build(ComputeDAG* graph, mlir::Value input, mlir::Value s
   auto biasType_ = biasType.dyn_cast<mlir::MemRefType>();
   auto scaleShape = scaleType_.getShape();
   auto biasShape = biasType_.getShape();
-/*-----------------scale bias合法性检查------------------*/
+  /*-----------------scale bias合法性检查------------------*/
   bool hasOneDim = false;
   for (int i=0; i<scaleShape.size(); i++) {
     if (scaleShape[scaleShape.size()-1-i] != input_shape[input_shape.size()-1-i]) {

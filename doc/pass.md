@@ -736,31 +736,7 @@ __global__ void kernel0(float* arg0, float* arg1, float* arg2, float* arg3) {
 }
 
 
-  func.func @BatchMatmul_8_32_m2048_n2048_k64_NT(%arg0: memref<8x32x2048x64xf32, 1>, %arg1: memref<8x32x2048x64xf32, 1>, %arg2: memref<8x32x2048x2048xf32, 1>) -> memref<8x32x2048x2048xf32, 1> attributes {func.state = "cpu"} {
-    affine.parallel (%arg3, %arg4, %arg5) = (0, 0, 0) to (8, 32, 16) {
-      %4 = affine.apply affine_map<(d0) -> (d0)>(%arg3)
-      %5 = affine.apply affine_map<(d0) -> (d0)>(%arg4)
-      %6 = affine.apply affine_map<(d0) -> (d0 * 128)>(%arg5)
-      affine.for %arg6 = 0 to 2048 step 64 {
-        affine.parallel (%arg7) = (0) to (128) {
-          affine.for %arg8 = 0 to 8 {
-            affine.for %arg9 = 0 to 8 {
-              %cst = arith.constant 0.000000e+00 : f32
-              %7 = affine.for %arg10 = 0 to 64 iter_args(%arg11 = %cst) -> (f32) {
-                %8 = affine.load %arg0[%4, %5, %6 + (%arg7 floordiv 8) * 8 + %arg8, %arg10] : memref<8x32x2048x64xf32, 1>
-                %9 = affine.load %arg1[%4, %5, %arg6 + (%arg7 mod 8) * 8 + %arg9, %arg10] : memref<8x32x2048x64xf32, 1>
-                %10 = arith.mulf %8, %9 : f32
-                %11 = arith.addf %10, %arg11 : f32
-                affine.yield %11 : f32
-              }
-              affine.store %7, %arg2[%4, %5, %6 + (%arg7 floordiv 8) * 8 + %arg8, %arg6 + (%arg7 mod 8) * 8 + %arg9] : memref<8x32x2048x2048xf32, 1>
-            }
-          }
-        }
-      }
-    }
-    return %arg2 : memref<8x32x2048x2048xf32, 1>
-  }
+
   
 1.onnx 参数做参考
   attr不做cuda参数，但做graph.create的参数
