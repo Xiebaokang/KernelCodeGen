@@ -138,6 +138,7 @@ public:
     if (platform == "CUDA") {
       return std::move(CUDAGen(module));
     }
+    return "";
   }
 
   void setLogMode(Log level) {
