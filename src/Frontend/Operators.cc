@@ -6,8 +6,9 @@ mlir::Type getDType(mlir::OpBuilder& builder, const std::string& dtype) {
   if(dtype == "float32") return builder.getF32Type();
   if(dtype == "float64") return builder.getF64Type();
   if(dtype == "float16") return builder.getF16Type();
+  if(dtype == "int64") return builder.getIntegerType(64);
   if(dtype == "int32") return builder.getIntegerType(32);
-  if(dtype == "int") return builder.getIntegerType(8);
+  if(dtype == "int16") return builder.getIntegerType(16);
   if(dtype == "index") return builder.getIndexType();
   if(dtype == "bool") return builder.getIntegerType(1);
   return nullptr;
@@ -19,9 +20,9 @@ std::string toStr(mlir::Type type) {
   if(type.isa<mlir::Float64Type>()) return {"float64"};
   if(auto int_type = type.dyn_cast<mlir::IntegerType>()) {
     if (int_type.getWidth() == 1) return {"bool"};
-    else if (int_type.getWidth() == 8) return {"int"};
-    else if (int_type.getWidth() == 32) return {"int32_t"};
-    else if (int_type.getWidth() == 64) return {"int64_t"};
+    else if (int_type.getWidth() == 16) return {"int16"};
+    else if (int_type.getWidth() == 32) return {"int32"};
+    else if (int_type.getWidth() == 64) return {"int64"};
   }
   if(type.isa<mlir::IndexType>()) return {"index"};
   return nullptr;

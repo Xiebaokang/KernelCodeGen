@@ -178,7 +178,7 @@ struct LayerNormOptimizer : Optimizer {
 
   std::map<mlir::func::FuncOp, MemoryBuffer, CompareFunc> layerNormBuffers;
   std::set<mlir::func::FuncOp, CompareFunc> layerNorms;
-  std::map<mlir::func::FuncOp, std::vector<mlir::AffineForOp>, CompareFunc> layerNormLoops;
+  std::map<mlir::func::FuncOp, std::vector<std::vector<mlir::AffineForOp>>, CompareFunc> layerNormLoops;
   static std::map<std::string, int> layerNormConfig;
 };
 
@@ -261,7 +261,8 @@ struct BatchMatmulOptimizer : Optimizer {
   virtual bool applicable(mlir::ModuleOp& module) override;
   virtual void applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& builder) override;
 
-  mlir::AffineMap getAffineMap(const std::string& mapIdentifier, mlir::OpBuilder& builder, const int64_t batchNum=0);
+  // mlir::AffineMap getAffineMap(const std::string& mapIdentifier, mlir::OpBuilder& builder, const int64_t batchNum=0);
+  mlir::AffineMap getAffineMap(const std::string& mapIdentifier, mlir::OpBuilder& builder);
 
   std::vector<mlir::Value> threadLevelOneToTwo(mlir::AffineParallelOp pal);
   void clear() {

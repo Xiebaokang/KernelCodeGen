@@ -14,7 +14,12 @@ inline std::string toCStr(mlir::Type type) {
   if(type.isa<mlir::Float16Type>()) return {"half_t"};
   if(type.isa<mlir::Float32Type>()) return {"float"};
   if(type.isa<mlir::Float64Type>()) return {"double"};
-  if(type.isa<mlir::IntegerType>()) return {"int"};
+  if(auto int_type = type.dyn_cast<mlir::IntegerType>()) {
+    if (int_type.getWidth() == 1) return {"bool"};
+    else if (int_type.getWidth() == 16) return {"int16_t"};
+    else if (int_type.getWidth() == 32) return {"int32_t"};
+    else if (int_type.getWidth() == 64) return {"int64_t"};
+  }
   if(type.isa<mlir::IndexType>()) return {"int"};
   return nullptr;
 }
@@ -388,6 +393,7 @@ void CUDAGenerator::codegen(mlir::gpu::BarrierOp) {
   indent();
   source << "__syncthreads();\n";
 }
+
 void CUDAGenerator::codegen(mlir::gpu::ShuffleOp shflOp) {
   indent();
   source << "auto " << getValueName(shflOp.getResult(0)) << " = ";
@@ -481,12 +487,14 @@ void CUDAGenerator::codegen(mlir::arith::AddFOp addOp) {
                << getValueName(addOp.getLhs()) << " + "
                << getValueName(addOp.getRhs()) << ";\n";
 }
+
 void CUDAGenerator::codegen(mlir::arith::MaxFOp maxOp) {
   indent();
   source << "auto " << getValueName(maxOp.getResult()) << " = max("
                << getValueName(maxOp.getLhs()) << " , "
                << getValueName(maxOp.getRhs()) << ");\n";
 }
+
 void CUDAGenerator::codegen(mlir::arith::SubFOp subOp) {
   indent();
   source << "auto " << getValueName(subOp.getResult()) << " = "
@@ -615,6 +623,8 @@ void CUDAGenerator::codegen(mlir::AffineIfOp ifOp) {
         this->codegen(sqrtOp);
       } else if (auto expOp = mlir::dyn_cast<mlir::math::ExpOp>(&op)) {
         this->codegen(expOp);
+      } else if (auto castOp = mlir::dyn_cast<mlir::arith::BitcastOp>(&op)) {
+        this->codegen(castOp);
       } else if (auto shflOp = mlir::dyn_cast<mlir::gpu::ShuffleOp>(&op)) {
         this->codegen(shflOp);
       } else {
@@ -933,6 +943,8 @@ void CUDAGenerator::codegen(mlir::AffineForOp forOp) {
         this->codegen(subOp);
       } else if (auto expOp = mlir::dyn_cast<mlir::math::ExpOp>(&op)) {
         this->codegen(expOp);
+      } else if (auto castOp = mlir::dyn_cast<mlir::arith::BitcastOp>(&op)) {
+        this->codegen(castOp);
       } else if (auto parallelOp = mlir::dyn_cast<mlir::AffineParallelOp>(&op)) {
         auto& innerOps = parallelOp.getBody()->getOperations();
         for (auto& innerOp : innerOps) {

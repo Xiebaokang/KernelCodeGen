@@ -12,7 +12,7 @@ void test_operators() {
   // generator.opts.push_back(std::move(std::make_unique<BatchMatmulOptimizer>()));
   // generator.opts.push_back(std::move(std::make_unique<MatmulOptimizer>()));
   // generator.opts.push_back(std::move(std::make_unique<BinaryOptimizer>()));
-  // generator.opts.push_back(std::move(std::make_unique<ElementWiseOptimizer>()));
+  generator.opts.push_back(std::move(std::make_unique<ElementWiseOptimizer>()));
   // generator.opts.push_back(std::move(std::make_unique<LayerNormOptimizer>()));
   // generator.opts.push_back(std::move(std::make_unique<GatherOptimizer>()));
   
@@ -21,13 +21,13 @@ void test_operators() {
   // int64_t axis = 0;
   // auto indices = graph.create<PlaceHolder>(std::vector<int64_t>{1}, std::string{"index"});
   // auto gather = graph.create<Gather>(A, indices, axis);
-  // auto gelu = graph.create<ElementWise>(A, "Gelu", MemorySpace::inplace);
+  auto gelu = graph.create<ElementWise>(A, "Cast", MemorySpace::global, "int32");  // 必须使用MemorySpace::global，且int16只能转float16，etc.
 
-  int64_t axis_ = 1;
-  float eps=1e-5;
-  auto scale = graph.create<PlaceHolder>(std::vector<int64_t>{768, 768}, std::string{"float32"});
-  auto bias = graph.create<PlaceHolder>(std::vector<int64_t>{768, 768}, std::string{"float32"});
-  auto layernorm = graph.create<LayerNorm>(A, scale, bias, axis_, eps);
+  // int64_t axis_ = 1;
+  // float eps=1e-5;
+  // auto scale = graph.create<PlaceHolder>(std::vector<int64_t>{768, 768}, std::string{"float32"});
+  // auto bias = graph.create<PlaceHolder>(std::vector<int64_t>{768, 768}, std::string{"float32"});
+  // auto layernorm = graph.create<LayerNorm>(A, scale, bias, axis_, eps);
 
   // auto A = graph.create<PlaceHolder>(std::vector<int64_t>{16, 1, 1, 256}, std::string{"float32"});
   // auto B = graph.create<PlaceHolder>(std::vector<int64_t>{1, 128, 256}, std::string{"float32"});
@@ -38,8 +38,8 @@ void test_operators() {
   // auto B = graph.create<PlaceHolder>(std::vector<int64_t>{k, n}, std::string{"float32"});
   // auto C = graph.create<Matmul>(A, B);
 
-  // auto A = graph.create<PlaceHolder>(std::vector<int64_t>{64, 2048, 64}, std::string{"float32"});
-  // auto B = graph.create<PlaceHolder>(std::vector<int64_t>{64, 2048, 64}, std::string{"float32"});
+  // auto A = graph.create<PlaceHolder>(std::vector<int64_t>{256, 2048, 64}, std::string{"float32"});
+  // auto B = graph.create<PlaceHolder>(std::vector<int64_t>{256, 2048, 64}, std::string{"float32"});
   // auto C = graph.create<BatchedMatmul>(A, Layout::rowMajor, B, Layout::colMajor);
 
   graph.dump();

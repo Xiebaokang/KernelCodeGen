@@ -2101,6 +2101,7 @@ mlir::AffineIfOp Rewriter::irregularMat(mlir::AffineForOp forOp, std::vector<int
 }
 
 mlir::AffineForOp Rewriter::combineToOneDim(std::vector<mlir::AffineForOp> loops) {
+  if (loops.size() == 1) return loops[0];
   std::vector<int64_t> originUps;
   std::vector<mlir::BlockArgument> oldIvs;
   int64_t combineUp = 1;

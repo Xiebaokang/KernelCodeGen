@@ -1188,9 +1188,20 @@ bool LayerNormOptimizer::applicable(mlir::ModuleOp& module) {
     }
     layerNorms.insert(layerNormFunc);
     auto&& loops = Analyzer::collectFuncLoops(layerNormFunc);
-    layerNormLoops[layerNormFunc] = std::move(loops);
-    auto funcArgs = layerNormFunc.front().getArguments();
 
+    int hasIterLoopNum = 0;
+    for (auto loop : loops) if (loop.getNumIterOperands()) hasIterLoopNum++;
+    int innerLoopItemNum = hasIterLoopNum / 2;
+    int outerLoopNum = loops.size() - innerLoopItemNum * 3;
+    std::vector<mlir::AffineForOp> outerLoops(loops.begin(), loops.begin()+outerLoopNum);
+    layerNormLoops[layerNormFunc].push_back(outerLoops);
+    // for (auto loop : loops) {llvm::outs() << loop << "\n";}
+    for (int i=0; i<3; i++) {
+      std::vector<mlir::AffineForOp> innerLoops(loops.begin()+outerLoopNum+i*innerLoopItemNum, loops.begin()+outerLoopNum+(i+1)*innerLoopItemNum);
+      layerNormLoops[layerNormFunc].push_back(innerLoops);
+    }
+    // layerNormLoops[layerNormFunc] = std::move(loops);
+    auto funcArgs = layerNormFunc.front().getArguments();
     MemoryBuffer buf;
     buf.input = funcArgs[0];
     buf.scale = funcArgs[1];
@@ -1794,24 +1805,24 @@ void LayerNormOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& 
     auto buffer = layerNormBuffers[layerNorm];
     auto input = buffer.input; auto output = buffer.output; 
     auto scale = buffer.scale; auto bias = buffer.bias;
-
-    std::vector<mlir::AffineForOp> sonLoops1, sonLoops2, sonLoops3;
-    int sonLoopsNum = (loops.size() - 1) / 3;
-    int iter1 = 1; int iter2 = iter1 + sonLoopsNum; int iter3 = iter2 + sonLoopsNum;
-    for (int i=0; i<sonLoopsNum; i++) {
-      sonLoops1.push_back(loops[iter1++]);
-      sonLoops2.push_back(loops[iter2++]);
-      sonLoops3.push_back(loops[iter3++]);
-    }
+    std::vector<mlir::AffineForOp> outLoops = loops[0], sonLoops1 = loops[1], sonLoops2 = loops[2], sonLoops3 = loops[3];
+    // std::vector<mlir::AffineForOp> sonLoops1, sonLoops2, sonLoops3;
+    // int sonLoopsNum = (loops.size() - 1) / 3;
+    // int iter1 = 1; int iter2 = iter1 + sonLoopsNum; int iter3 = iter2 + sonLoopsNum;
+    // for (int i=0; i<sonLoopsNum; i++) {
+    //   sonLoops1.push_back(loops[iter1++]);
+    //   sonLoops2.push_back(loops[iter2++]);
+    //   sonLoops3.push_back(loops[iter3++]);
+    // }
     // auto extras = getCreateAffineMapArgs(sonLoops1);
-
+    auto outLoop = Rewriter::combineToOneDim(outLoops);
     auto sonLoop1 = Rewriter::combineToOneDim(sonLoops1);
     auto sonLoop2 = Rewriter::combineToOneDim(sonLoops2);
     auto sonLoop3 = Rewriter::combineToOneDim(sonLoops3);
     DUMP(module);
 
-    auto iterBuffer1 = Rewriter::bufferizeLoopCarryVar(sonLoop1, loops[0].getBody());
-    auto iterBuffer2 = Rewriter::bufferizeLoopCarryVar(sonLoop2, loops[0].getBody());
+    auto iterBuffer1 = Rewriter::bufferizeLoopCarryVar(sonLoop1, outLoop.getBody());
+    auto iterBuffer2 = Rewriter::bufferizeLoopCarryVar(sonLoop2, outLoop.getBody());
     DUMP(module);
 
     auto split_loops1 = Rewriter::split(sonLoop1, 3, {layerNormConfig["THREAD_SIZE"], layerNormConfig["BLOCK_SIZE"]});
@@ -1823,7 +1834,7 @@ void LayerNormOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& 
     Rewriter::swapLoops({{split_loops1[0], split_loops1[1]}, {split_loops2[0], split_loops2[1]}, {split_loops3[0], split_loops3[1]}});
     DUMP(module);
     
-    auto gridLevel = Rewriter::parallel({loops[0]});
+    auto gridLevel = Rewriter::parallel({outLoop});
     auto blockLevel1 = Rewriter::parallel({split_loops1[1]});
     auto blockLevel2 = Rewriter::parallel({split_loops2[1]});
     auto blockLevel3 = Rewriter::parallel({split_loops3[1]});
@@ -2897,7 +2908,264 @@ mlir::AffineExpr shiftExprDim(mlir::OpBuilder& builder, mlir::AffineExpr expr, i
   }
 }
 
-mlir::AffineMap BatchMatmulOptimizer::getAffineMap(const std::string& mapIdentifier, mlir::OpBuilder& builder, int64_t batchNum) {
+// mlir::AffineMap BatchMatmulOptimizer::getAffineMap(const std::string& mapIdentifier, mlir::OpBuilder& builder, int64_t batchNum) {
+//   auto dim0 = builder.getAffineDimExpr(0);
+//   auto dim1 = builder.getAffineDimExpr(1);
+//   auto dim2 = builder.getAffineDimExpr(2);
+//   auto dim3 = builder.getAffineDimExpr(3);
+//   auto dim4 = builder.getAffineDimExpr(4);
+//   auto dim5 = builder.getAffineDimExpr(5);
+//   auto dim6 = builder.getAffineDimExpr(6);
+//   auto dim7 = builder.getAffineDimExpr(7);
+//   auto dim8 = builder.getAffineDimExpr(8);
+//   auto dim9 = builder.getAffineDimExpr(9);
+//   int width = batchMatmulConfig["VECTORIZE_WIDTH"];
+//   int block_size = batchMatmulConfig["BLOCK_SIZE_M"];
+//   int for_size = batchMatmulConfig["FOR_SIZE_N"];
+//   int thread_size = batchMatmulConfig["THREAD_SIZE"];
+//   int slice = batchMatmulConfig["Slice"];
+
+//   if (mapIdentifier == "one") {
+//     std::vector<mlir::AffineExpr> exprs;
+//     int interval = block_size/((block_size*slice/width)/block_size); // 128/(((128*8)/4)/128)
+//     for (int i=0; i<batchNum; i++) {
+//       exprs.push_back(builder.getAffineDimExpr(i));
+//     }
+//     auto yDimExpr = dim0+dim1.floorDiv(slice/width)+dim3*interval;
+//     auto xDimExpr = dim2+(dim1%(slice/width))*width;
+//     exprs.push_back(shiftExprDim(builder, yDimExpr, batchNum));
+//     exprs.push_back(shiftExprDim(builder, xDimExpr, batchNum));
+//     return mlir::AffineMap::get(4+batchNum, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+//   } 
+//   else if (mapIdentifier == "two") {
+//     std::vector<mlir::AffineExpr> exprs;
+//     int interval = for_size/((for_size*slice/width)/block_size);  // block size is count of thread in per block.
+//     for (int i=0; i<batchNum; i++) {
+//       exprs.push_back(builder.getAffineDimExpr(i));
+//     }
+//     auto yDimExpr = dim0+dim1.floorDiv(for_size/width)+dim3*interval;
+//     auto xDimExpr = dim2+(dim1%(for_size/width))*width;
+//     exprs.push_back(shiftExprDim(builder, yDimExpr, batchNum));
+//     exprs.push_back(shiftExprDim(builder, xDimExpr, batchNum));
+//     return mlir::AffineMap::get(4+batchNum, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+//   } 
+//   else if (mapIdentifier == "three"){
+//     std::vector<mlir::AffineExpr> exprs;
+//     int interval = block_size/((block_size*slice/width)/block_size);
+//     exprs.push_back(dim0%(slice/width)*width+dim2);
+//     exprs.push_back(dim0.floorDiv(slice/width)+dim1*interval);
+//     return mlir::AffineMap::get(3, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+//   } 
+//   else if (mapIdentifier == "four"){
+//     std::vector<mlir::AffineExpr> exprs;
+//     int interval = for_size/((for_size*slice/width)/block_size);
+//     exprs.push_back(dim0.floorDiv(for_size/width)+dim1*interval);
+//     exprs.push_back(dim0 % (for_size/width)*width);
+//     return mlir::AffineMap::get(2, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+//   } 
+//   else if (mapIdentifier == "five"){
+//     std::vector<mlir::AffineExpr> exprs;
+//     exprs.push_back(dim0);
+//     exprs.push_back(dim1*4+dim2*(block_size/(thread_size/width)));
+//     return mlir::AffineMap::get(3, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+//   } 
+//   else if (mapIdentifier == "six"){
+//     std::vector<mlir::AffineExpr> exprs;
+//     exprs.push_back(dim0);
+//     exprs.push_back(dim1*4+dim2*(for_size/(thread_size/width)));
+//     return mlir::AffineMap::get(3, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+//   } 
+//   else if (mapIdentifier == "eight") {
+//     std::vector<mlir::AffineExpr> exprs;
+//     exprs.push_back(dim0);
+//     return mlir::AffineMap::get(1, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+//   } 
+//   else if (mapIdentifier == "nine") {
+//     std::vector<mlir::AffineExpr> exprs;
+//     int intervalY = block_size / (thread_size / width);
+//     int intervalX = for_size / (thread_size / width);
+//     for (int i=0; i<batchNum; i++) {
+//       exprs.push_back(builder.getAffineDimExpr(i));
+//     }
+//     auto yDimExpr = dim0+dim1*intervalY+dim2*width+dim3;
+//     auto xDimExpr = dim4+dim5*width+dim6*intervalX+dim7;
+//     exprs.push_back(shiftExprDim(builder, yDimExpr, batchNum));
+//     exprs.push_back(shiftExprDim(builder, xDimExpr, batchNum));
+//     // for (auto e : exprs) {llvm::outs() << e << "\n";} llvm::outs() << "\n";
+//     return mlir::AffineMap::get(8+batchNum, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+//   }
+//   else {
+//     assert(false);
+//   }
+// }
+
+// void BatchMatmulOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder& builder) {
+//   for (auto batchMatmul : batchMatmuls) {
+//     auto loops = batchMatmulLoops[batchMatmul];
+//     auto buffer = batchMatmulBuffers[batchMatmul];
+//     auto A = buffer.A; auto B = buffer.B; auto C = buffer.C;
+//     // auto descirpe = buffer.matmul;
+//     auto batchNum = buffer.matmul.batch.size();
+
+//     auto m_split_loops = Rewriter::split(loops[loops.size()-3], 3, {batchMatmulConfig["THREAD_SIZE"], batchMatmulConfig["BLOCK_SIZE_M"]});
+//     auto n_split_loops = Rewriter::split(loops[loops.size()-2], 3, {batchMatmulConfig["THREAD_SIZE"], batchMatmulConfig["FOR_SIZE_N"]});
+
+//     auto loopK = loops[loops.size() - 1];
+//     auto m_outer = m_split_loops[0]; auto m_mider = m_split_loops[1]; auto m_inner = m_split_loops[2];
+//     auto n_outer = n_split_loops[0]; auto n_mider = n_split_loops[1]; auto n_inner = n_split_loops[2];
+
+//     Rewriter::reorder({m_outer, n_outer, m_mider, n_mider, m_inner, n_inner});
+//     m_mider = Rewriter::modifyLoopStepToOne(m_mider);
+//     n_mider = Rewriter::modifyLoopStepToOne(n_mider);
+//     DUMP(module);
+
+//     auto combineLoop = Rewriter::combineToOneDim({m_mider, n_mider});
+//     DUMP(module);
+
+//     std::vector<mlir::AffineForOp> palLoops;
+//     for (int i=0; i< batchNum; i++) {palLoops.push_back(loops[i]);}
+//     palLoops.push_back(m_outer);
+//     auto gridLevel = Rewriter::parallel(palLoops);
+//     auto blockLevel = Rewriter::parallel({combineLoop});
+//     DUMP(module);
+
+//     std::vector<mlir::AffineForOp> kmn_axes{loopK, m_inner, n_inner};
+//     auto tileC = Rewriter::bufferizeLoopCarryVar(kmn_axes);
+//     loopK = kmn_axes[0], m_inner = kmn_axes[1], n_inner = kmn_axes[2];
+//     Rewriter::reorder({loopK, m_inner, n_inner});
+//     DUMP(module);
+
+//     auto k_axes = Rewriter::split(loopK, 2, {batchMatmulConfig["BLOCK_SIZE_K"]});
+//     auto k_outer = k_axes[0], k_inner = k_axes[1];
+//     DUMP(module);
+
+//     int64_t blockThreads;
+//     auto blockDim = Analyzer::getParallelNumber(blockLevel, blockThreads);
+
+//     auto ldgASize = batchMatmulConfig["BLOCK_SIZE_K"] * batchMatmulConfig["BLOCK_SIZE_M"] / blockThreads;
+//     auto ldgBSize = batchMatmulConfig["BLOCK_SIZE_K"] * batchMatmulConfig["FOR_SIZE_N"] / blockThreads;
+//     auto fragSize = batchMatmulConfig["THREAD_SIZE"];
+
+//     auto blockElemIdx = Rewriter::getElementIdx(gridLevel);
+//     auto blockIdx = Rewriter::getParallelIdx(gridLevel);
+//     auto threadIdx = Rewriter::getParallelIdx(blockLevel);
+
+//     auto elementA = A.getType().dyn_cast<mlir::MemRefType>().getElementType();
+//     auto elementB = B.getType().dyn_cast<mlir::MemRefType>().getElementType();
+//     auto tileA = Rewriter::alloc_buffer(gridLevel, MemorySpace::local, {ldgASize}, elementA);  // reg4
+//     auto tileB = Rewriter::alloc_buffer(gridLevel, MemorySpace::local, {ldgBSize}, elementB);  // reg8
+
+//     auto fragA = Rewriter::alloc_buffer(gridLevel, MemorySpace::local, {fragSize}, elementA);  // reg8
+//     auto fragB = Rewriter::alloc_buffer(gridLevel, MemorySpace::local, {fragSize}, elementB);
+
+//     auto smA = Rewriter::alloc_buffer(gridLevel, MemorySpace::shared, {batchMatmulConfig["BLOCK_SIZE_K"], batchMatmulConfig["BLOCK_SIZE_M"]}, elementA);
+//     auto smB = Rewriter::alloc_buffer(gridLevel, MemorySpace::shared, {batchMatmulConfig["BLOCK_SIZE_K"], batchMatmulConfig["FOR_SIZE_N"]}, elementB);
+
+//     llvm::SmallVector<mlir::Value> operandsA({blockElemIdx[batchNum], threadIdx[0], k_outer.getInductionVar()});
+//     for (int i=0; i<batchNum; i++) { operandsA.insert(operandsA.begin(), blockIdx[i]); }
+//     auto loadTileA = Rewriter::read(A, tileA, getAffineMap("one", builder, batchNum), operandsA, batchMatmulConfig["VECTORIZE_WIDTH"], k_outer, Position::begin);
+//     llvm::SmallVector<mlir::Value> operandsB({k_outer.getInductionVar(), threadIdx[0], n_outer.getInductionVar()});
+//     for (int i=0; i<batchNum; i++) { operandsB.insert(operandsB.begin(), blockIdx[i]); }
+//     auto loadTileB = Rewriter::read(B, tileB, getAffineMap("two", builder, batchNum), operandsB, batchMatmulConfig["VECTORIZE_WIDTH"], loadTileA, Position::after);
+//     DUMP(module);
+
+//     auto storeTileA = Rewriter::write(tileA, smA, getAffineMap("three", builder), 
+//                                       {threadIdx[0]}, batchMatmulConfig["VECTORIZE_WIDTH"], loadTileB, Position::after);
+//     auto storeTileB = Rewriter::write(tileB, smB, getAffineMap("four", builder), 
+//                                       {threadIdx[0]}, batchMatmulConfig["VECTORIZE_WIDTH"], storeTileA, Position::after);
+//     auto gpuBarrierPrefix = Rewriter::barrier(loadTileA, Position::before);
+//     auto gpuBarrierSuffix = Rewriter::barrier(storeTileB, Position::after);
+//     DUMP(module);
+
+//     int64_t oneDimLen = sqrt(batchMatmulConfig["FOR_SIZE_N"]);
+//     auto threadIdx_ =  Rewriter::blockLevelOneToTwo(blockLevel, oneDimLen);
+
+//     auto loadFragA = Rewriter::read(smA, fragA, getAffineMap("five", builder),
+//                                     {k_inner.getInductionVar(), threadIdx_[0]}, batchMatmulConfig["VECTORIZE_WIDTH"], k_inner, Position::begin);
+//     auto loadFragB = Rewriter::read(smB, fragB, getAffineMap("six", builder), 
+//                                     {k_inner.getInductionVar(), threadIdx_[1]}, batchMatmulConfig["VECTORIZE_WIDTH"], loadFragA, Position::after);
+//     DUMP(module);
+
+//     Rewriter::cache_read(k_inner, A, fragA, getAffineMap("eight", builder), {m_inner.getInductionVar()});
+//     Rewriter::cache_read(k_inner, B, fragB, getAffineMap("eight", builder), {n_inner.getInductionVar()});
+//     DUMP(module);
+
+//     auto writeCbody = Rewriter::get_write(blockLevel, C);
+//     assert(writeCbody.size() == 1);
+//     auto m_inner_axes = Rewriter::split(writeCbody[0][0], 2, {batchMatmulConfig["VECTORIZE_WIDTH"]});
+//     auto n_inner_axes = Rewriter::split(writeCbody[0][1], 2, {batchMatmulConfig["VECTORIZE_WIDTH"]});
+//     auto m_inner_0 = m_inner_axes[0], m_inner_1 = m_inner_axes[1];
+//     auto n_inner_0 = n_inner_axes[0], n_inner_1 = n_inner_axes[1];
+//     Rewriter::reorder({m_inner_0, n_inner_0, m_inner_1, n_inner_1});
+//     m_inner_0 = Rewriter::modifyLoopStepToOne(m_inner_0);
+//     n_inner_0 = Rewriter::modifyLoopStepToOne(n_inner_0);
+//     DUMP(module);
+    
+//     llvm::SmallVector<mlir::Value> operandsC({blockElemIdx[batchNum], m_inner_0.getInductionVar(), threadIdx_[0], m_inner_1.getInductionVar(),
+//                                               n_outer.getInductionVar(), threadIdx_[1], n_inner_0.getInductionVar(), n_inner_1.getInductionVar()});
+//     for (int i=0; i<batchNum; i++) { operandsC.insert(operandsC.begin(), blockIdx[i]); }
+//     Rewriter::cache_write(m_inner_0, C, C, getAffineMap("nine", builder, batchNum), operandsC);
+//     Rewriter::vectorize(n_inner_1, batchMatmulConfig["VECTORIZE_WIDTH"]);
+//     DUMP(module);
+
+//     auto doubleLoadTileB = Rewriter::pipeline({loadTileB, storeTileB}, smB, k_outer);
+//     auto doubleLoadTileA = Rewriter::pipeline({loadTileA, storeTileA}, smA, k_outer);
+//     auto doubleLoadFragB = Rewriter::pipeline({loadFragB}, fragB, k_inner);
+//     auto doubleLoadFragA = Rewriter::pipeline({loadFragA}, fragA, k_inner);
+//     DUMP(module);
+
+//     Rewriter::detach_last_loop(k_inner);
+//     DUMP(module);
+
+//     Rewriter::schedule(doubleLoadTileA[0][0], doubleLoadTileB[0][0], Position::before);
+//     Rewriter::schedule(doubleLoadTileA[0][1], doubleLoadTileB[0][1], Position::before); 
+//     Rewriter::schedule(gpuBarrierPrefix, doubleLoadTileB[0][1], Position::after);
+//     Rewriter::schedule(doubleLoadTileB[1][0], doubleLoadTileA[1][0], Position::after);
+//     Rewriter::schedule(doubleLoadTileA[1][1], doubleLoadTileB[1][1], Position::before);
+//     Rewriter::schedule(gpuBarrierSuffix, doubleLoadTileB[1][1], Position::after);
+//     auto ifOp = doubleLoadTileA[1][1]->getParentOp();
+//     Rewriter::schedule(ifOp, k_inner, Position::after); 
+//     Rewriter::extract_loop(doubleLoadFragA[0][0], k_outer, /*iteration*/0);
+//     Rewriter::extract_loop(doubleLoadFragB[0][0], k_outer, /*iteration*/0);
+//     Rewriter::schedule(doubleLoadFragB[0][0], k_outer, Position::end);
+//     Rewriter::schedule(doubleLoadFragA[0][0], k_outer, Position::end);
+//     DUMP(module);
+
+//     Rewriter::change_double_buffer(doubleLoadFragA[0][0], smA);
+//     Rewriter::change_double_buffer(doubleLoadFragB[0][0], smB);;
+//     DUMP(module);
+
+//     Rewriter::take_off_true_if(module);
+//     Rewriter::delete_false_if(module);
+//     DUMP(module);
+  
+//     int64_t threshold = std::max(batchMatmulConfig["BLOCK_SIZE_K"], std::max(batchMatmulConfig["THREAD_SIZE_M"], batchMatmulConfig["THREAD_SIZE"]));
+//     Rewriter::unroll(module, [&](mlir::AffineForOp forOp)->bool {
+//       if (!forOp.hasConstantBounds()) return false;
+//       auto step = forOp.getStep();
+//       auto ub = forOp.getConstantUpperBound();
+//       auto lb = forOp.getConstantLowerBound();
+//       auto times = (ub - lb) / step;
+//       if (times >= std::min<int64_t>(threshold, batchMatmulConfig["VECTORIZE_WIDTH"])) return false;
+//       return true;
+//     });
+//     DUMP(module);
+
+//     Rewriter::unrollAttribute(module, [&](mlir::AffineForOp forOp)->bool {
+//       if (!forOp.hasConstantBounds()) return false;
+//       auto step = forOp.getStep();
+//       auto ub = forOp.getConstantUpperBound();
+//       auto lb = forOp.getConstantLowerBound();
+//       auto times = (ub - lb) / step;
+//       if (times > threshold) return false;
+//       return true;
+//     });
+//     Rewriter::deleteExtraCstOp(gridLevel);
+//     DUMP(module);
+//   }
+// }
+
+mlir::AffineMap BatchMatmulOptimizer::getAffineMap(const std::string& mapIdentifier, mlir::OpBuilder& builder) {
   auto dim0 = builder.getAffineDimExpr(0);
   auto dim1 = builder.getAffineDimExpr(1);
   auto dim2 = builder.getAffineDimExpr(2);
@@ -2907,82 +3175,113 @@ mlir::AffineMap BatchMatmulOptimizer::getAffineMap(const std::string& mapIdentif
   auto dim6 = builder.getAffineDimExpr(6);
   auto dim7 = builder.getAffineDimExpr(7);
   auto dim8 = builder.getAffineDimExpr(8);
-  auto dim9 = builder.getAffineDimExpr(9);
-  int width = batchMatmulConfig["VECTORIZE_WIDTH"];
-  int block_size = batchMatmulConfig["BLOCK_SIZE_M"];
-  int for_size = batchMatmulConfig["FOR_SIZE_N"];
-  int thread_size = batchMatmulConfig["THREAD_SIZE"];
-  int slice = batchMatmulConfig["Slice"];
 
-  if (mapIdentifier == "one") {
-    std::vector<mlir::AffineExpr> exprs;
-    int interval = block_size/((block_size*slice/width)/block_size); // 128/(((128*8)/4)/128)
-    for (int i=0; i<batchNum; i++) {
-      exprs.push_back(builder.getAffineDimExpr(i));
-    }
-    auto yDimExpr = dim0+dim1.floorDiv(slice/width)+dim3*interval;
-    auto xDimExpr = dim2+(dim1%(slice/width))*width;
-    exprs.push_back(shiftExprDim(builder, yDimExpr, batchNum));
-    exprs.push_back(shiftExprDim(builder, xDimExpr, batchNum));
-    return mlir::AffineMap::get(4+batchNum, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
-  } 
-  else if (mapIdentifier == "two") {
-    std::vector<mlir::AffineExpr> exprs;
-    int interval = for_size/((for_size*slice/width)/block_size);  // block size is count of thread in per block.
-    for (int i=0; i<batchNum; i++) {
-      exprs.push_back(builder.getAffineDimExpr(i));
-    }
-    auto yDimExpr = dim0+dim1.floorDiv(for_size/width)+dim3*interval;
-    auto xDimExpr = dim2+(dim1%(for_size/width))*width;
-    exprs.push_back(shiftExprDim(builder, yDimExpr, batchNum));
-    exprs.push_back(shiftExprDim(builder, xDimExpr, batchNum));
-    return mlir::AffineMap::get(4+batchNum, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
-  } 
-  else if (mapIdentifier == "three"){
-    std::vector<mlir::AffineExpr> exprs;
-    int interval = block_size/((block_size*slice/width)/block_size);
-    exprs.push_back(dim0%(slice/width)*width+dim2);
-    exprs.push_back(dim0.floorDiv(slice/width)+dim1*interval);
-    return mlir::AffineMap::get(3, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
-  } 
-  else if (mapIdentifier == "four"){
-    std::vector<mlir::AffineExpr> exprs;
-    int interval = for_size/((for_size*slice/width)/block_size);
-    exprs.push_back(dim0.floorDiv(for_size/width)+dim1*interval);
-    exprs.push_back(dim0 % (for_size/width)*width);
-    return mlir::AffineMap::get(2, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
-  } 
-  else if (mapIdentifier == "five"){
-    std::vector<mlir::AffineExpr> exprs;
+  int64_t block_size_m = batchMatmulConfig["BLOCK_SIZE_M"];
+  int64_t block_size_n = batchMatmulConfig["BLOCK_SIZE_N"];
+  int64_t block_size_k = batchMatmulConfig["BLOCK_SIZE_K"];
+  int64_t thread_size_m = batchMatmulConfig["THREAD_SIZE_M"];
+  int64_t thread_size_n = batchMatmulConfig["THREAD_SIZE_N"];
+  int64_t warpSize = batchMatmulConfig["WARP_SIZE"];
+
+  int64_t blockDimY = block_size_m / thread_size_m;   // thready
+  int64_t blockDimX = block_size_n / thread_size_n;   // threadx
+  bool vectorize = batchMatmulConfig.count("VECTORIZE_WIDTH") != 0;
+  int width = vectorize ? batchMatmulConfig["VECTORIZE_WIDTH"] : 1;
+
+  int64_t warp_size_y = 8;  // 将一个warp排列为y方向8个thread
+  int64_t warp_size_x = 4;  // 将一个warp排列为x方向4个thread
+  int64_t perBlockWarp_x = 4;  // 将一个block划分为x方向4个warp
+  int64_t perBlockWarp_y = (blockDimY * blockDimX) / warpSize / perBlockWarp_x;  // 将一个block划分为y方向blockThreadNum/32/4个warp
+
+  // std::vector<int64_t> warpOrg {2, 4};  
+  // std::vector<int64_t> threadOrg {8, 4};
+
+  if (mapIdentifier == "loadTileA") {
+    auto threadIdExpr = dim1 * blockDimX + dim2;  // tid
+    auto virtaulThreadIxExpr = threadIdExpr + dim5 * blockDimY * blockDimX;
+    auto M_Offset = virtaulThreadIxExpr.floorDiv(static_cast<uint64_t>(block_size_k) / width);
+    auto K_Offset = virtaulThreadIxExpr % (static_cast<uint64_t>(block_size_k) / width); 
+    auto M_Base = dim3 * block_size_m;
+    auto K_Base = dim4;
+    llvm::SmallVector<mlir::AffineExpr> exprs;
     exprs.push_back(dim0);
-    exprs.push_back(dim1*4+dim2*(block_size/(thread_size/width)));
-    return mlir::AffineMap::get(3, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+    exprs.push_back(M_Offset + M_Base);
+    exprs.push_back(K_Offset * width + K_Base);
+    return mlir::AffineMap::get(/*dimCount*/6, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
   } 
-  else if (mapIdentifier == "six"){
-    std::vector<mlir::AffineExpr> exprs;
+  else if (mapIdentifier == "loadTileB") {
+    auto threadIdExpr = dim1 * blockDimX + dim2;
+    auto virtaulThreadIxExpr = threadIdExpr + dim5 * blockDimY * blockDimX;
+    auto K_Offset = virtaulThreadIxExpr.floorDiv(static_cast<uint64_t>(block_size_n) / width);
+    auto N_Offset = virtaulThreadIxExpr % (static_cast<uint64_t>(block_size_n) / width); 
+    auto K_Base = dim3;
+    auto N_Base = dim4 * block_size_n;
+    llvm::SmallVector<mlir::AffineExpr> exprs;
     exprs.push_back(dim0);
-    exprs.push_back(dim1*4+dim2*(for_size/(thread_size/width)));
-    return mlir::AffineMap::get(3, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+    exprs.push_back(K_Offset + K_Base);
+    exprs.push_back(N_Offset * width + N_Base);
+    return mlir::AffineMap::get(/*dimCount*/6, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
   } 
-  else if (mapIdentifier == "eight") {
-    std::vector<mlir::AffineExpr> exprs;
+  else if (mapIdentifier == "storeTileA") {
+    auto threadIdExpr = dim0 * blockDimX + dim1;
+    auto virtaulThreadIxExpr = threadIdExpr + dim2 * blockDimY * blockDimX;
+    auto M_Offset = virtaulThreadIxExpr.floorDiv(static_cast<uint64_t>(block_size_k) / width);
+    auto K_Offset = virtaulThreadIxExpr % (static_cast<uint64_t>(block_size_k) / width);
+    llvm::SmallVector<mlir::AffineExpr> exprs;
+    exprs.push_back(K_Offset * width + dim3);
+    exprs.push_back(M_Offset);
+    return mlir::AffineMap::get(/*dimCount*/4, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+  } 
+  else if (mapIdentifier == "storeTileB") {
+    auto threadIdExpr = dim0 * blockDimX + dim1;
+    auto virtaulThreadIxExpr = threadIdExpr + dim2 * blockDimY * blockDimX;
+    auto K_Offset = virtaulThreadIxExpr.floorDiv(static_cast<uint64_t>(block_size_n) / width);
+    auto N_Offset = virtaulThreadIxExpr % (static_cast<uint64_t>(block_size_n) / width); 
+    llvm::SmallVector<mlir::AffineExpr> exprs;
+    exprs.push_back(K_Offset);
+    exprs.push_back(N_Offset * width);
+    return mlir::AffineMap::get(/*dimCount*/3, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+  } 
+  else if (mapIdentifier == "loadFragA") {
+    auto threadIdExpr = dim0 * blockDimX + dim1;
+    auto warpId = threadIdExpr.floorDiv(static_cast<uint64_t>(warpSize));
+    auto laneId = threadIdExpr % static_cast<uint64_t>(warpSize);
+    auto M_offset = laneId.floorDiv(warp_size_x) + warp_size_y * (warpId.floorDiv(warp_size_x) + dim3 * perBlockWarp_y);
+    auto K_offset = dim2;
+    llvm::SmallVector<mlir::AffineExpr> exprs;
+    exprs.push_back(K_offset);
+    exprs.push_back(M_offset * width);
+    return mlir::AffineMap::get(/*dimCount*/4, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+  } 
+  else if (mapIdentifier == "loadFragB") {
+    auto threadIdExpr = dim0 * blockDimX + dim1;
+    auto warpId = threadIdExpr.floorDiv(static_cast<uint64_t>(warpSize));
+    auto laneId = threadIdExpr % static_cast<uint64_t>(warpSize);
+    auto N_offset = laneId % warp_size_x + warp_size_x * (warpId % warp_size_x + dim3 * perBlockWarp_x);
+    auto K_offset = dim2;
+    llvm::SmallVector<mlir::AffineExpr> exprs;
+    exprs.push_back(K_offset);
+    exprs.push_back(N_offset * width);
+    return mlir::AffineMap::get(/*dimCount*/4, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+  } 
+  else if (mapIdentifier == "cacheReadA" || mapIdentifier == "cacheReadB") {
+    llvm::SmallVector<mlir::AffineExpr> exprs;
     exprs.push_back(dim0);
-    return mlir::AffineMap::get(1, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+    return mlir::AffineMap::get(/*dimCount*/1, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
   } 
-  else if (mapIdentifier == "nine") {
-    std::vector<mlir::AffineExpr> exprs;
-    int intervalY = block_size / (thread_size / width);
-    int intervalX = for_size / (thread_size / width);
-    for (int i=0; i<batchNum; i++) {
-      exprs.push_back(builder.getAffineDimExpr(i));
-    }
-    auto yDimExpr = dim0+dim1*intervalY+dim2*width+dim3;
-    auto xDimExpr = dim4+dim5*width+dim6*intervalX+dim7;
-    exprs.push_back(shiftExprDim(builder, yDimExpr, batchNum));
-    exprs.push_back(shiftExprDim(builder, xDimExpr, batchNum));
-    for (auto e : exprs) {llvm::outs() << e << "\n";} llvm::outs() << "\n";
-    return mlir::AffineMap::get(8+batchNum, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
-  }
+  else if (mapIdentifier == "cacheWriteC") {
+    auto threadIdExpr = dim1 * blockDimX + dim2;
+    auto warpId = threadIdExpr.floorDiv(static_cast<uint64_t>(warpSize));
+    auto laneId = threadIdExpr % static_cast<uint64_t>(warpSize);
+
+    auto M_offset = laneId.floorDiv(warp_size_x) + warp_size_y * (warpId.floorDiv(warp_size_x) + dim5.floorDiv(width) * perBlockWarp_y);
+    auto N_offset = laneId % warp_size_x + warp_size_x * (warpId % warp_size_x + dim6.floorDiv(width) * perBlockWarp_x);
+    llvm::SmallVector<mlir::AffineExpr> exprs;
+    exprs.push_back(dim0);
+    exprs.push_back(dim3 * block_size_m + M_offset * width + dim7);
+    exprs.push_back(dim4 * block_size_m + N_offset * width + dim8);
+    return mlir::AffineMap::get(/*dimCount*/9, 0, llvm::ArrayRef<mlir::AffineExpr>(exprs), builder.getContext());
+  } 
   else {
     assert(false);
   }
@@ -2996,26 +3295,18 @@ void BatchMatmulOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder
     // auto descirpe = buffer.matmul;
     auto batchNum = buffer.matmul.batch.size();
 
-    auto m_split_loops = Rewriter::split(loops[loops.size()-3], 3, {batchMatmulConfig["THREAD_SIZE"], batchMatmulConfig["BLOCK_SIZE_M"]});
-    auto n_split_loops = Rewriter::split(loops[loops.size()-2], 3, {batchMatmulConfig["THREAD_SIZE"], batchMatmulConfig["FOR_SIZE_N"]});
+    auto m_split_loops = Rewriter::split(loops[loops.size()-3], 3, {batchMatmulConfig["THREAD_SIZE_M"], batchMatmulConfig["BLOCK_SIZE_M"]});
+    auto n_split_loops = Rewriter::split(loops[loops.size()-2], 3, {batchMatmulConfig["THREAD_SIZE_N"], batchMatmulConfig["BLOCK_SIZE_N"]});
 
     auto loopK = loops[loops.size() - 1];
     auto m_outer = m_split_loops[0]; auto m_mider = m_split_loops[1]; auto m_inner = m_split_loops[2];
     auto n_outer = n_split_loops[0]; auto n_mider = n_split_loops[1]; auto n_inner = n_split_loops[2];
 
     Rewriter::reorder({m_outer, n_outer, m_mider, n_mider, m_inner, n_inner});
-    m_mider = Rewriter::modifyLoopStepToOne(m_mider);
-    n_mider = Rewriter::modifyLoopStepToOne(n_mider);
     DUMP(module);
-
-    auto combineLoop = Rewriter::combineToOneDim({m_mider, n_mider});
-    DUMP(module);
-
-    std::vector<mlir::AffineForOp> palLoops;
-    for (int i=0; i< batchNum; i++) {palLoops.push_back(loops[i]);}
-    palLoops.push_back(m_outer);
-    auto gridLevel = Rewriter::parallel(palLoops);
-    auto blockLevel = Rewriter::parallel({combineLoop});
+    
+    auto gridLevel = Rewriter::parallel({loops[0], m_outer, n_outer});
+    auto blockLevel = Rewriter::parallel({m_mider, n_mider});
     DUMP(module);
 
     std::vector<mlir::AffineForOp> kmn_axes{loopK, m_inner, n_inner};
@@ -3032,70 +3323,68 @@ void BatchMatmulOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder
     auto blockDim = Analyzer::getParallelNumber(blockLevel, blockThreads);
 
     auto ldgASize = batchMatmulConfig["BLOCK_SIZE_K"] * batchMatmulConfig["BLOCK_SIZE_M"] / blockThreads;
-    auto ldgBSize = batchMatmulConfig["BLOCK_SIZE_K"] * batchMatmulConfig["FOR_SIZE_N"] / blockThreads;
-    auto fragSize = batchMatmulConfig["Slice"];
-
-    auto blockElemIdx = Rewriter::getElementIdx(gridLevel);
-    auto blockIdx = Rewriter::getParallelIdx(gridLevel);
-    auto threadIdx = Rewriter::getParallelIdx(blockLevel);
-    llvm::outs() << blockElemIdx.size() << " " << blockIdx.size() << "\n";
-
+    auto ldgBSize = batchMatmulConfig["BLOCK_SIZE_K"] * batchMatmulConfig["BLOCK_SIZE_N"] / blockThreads;
+    auto fragASize = batchMatmulConfig["THREAD_SIZE_M"];
+    auto fragBSize = batchMatmulConfig["THREAD_SIZE_N"];
+    auto vectorize_width = batchMatmulConfig["VECTORIZE_WIDTH"];
     auto elementA = A.getType().dyn_cast<mlir::MemRefType>().getElementType();
     auto elementB = B.getType().dyn_cast<mlir::MemRefType>().getElementType();
-    auto tileA = Rewriter::alloc_buffer(gridLevel, MemorySpace::local, {ldgASize}, elementA);  // reg8 zhong zhuang
-    auto tileB = Rewriter::alloc_buffer(gridLevel, MemorySpace::local, {ldgBSize}, elementB);  // reg4
 
-    auto fragA = Rewriter::alloc_buffer(gridLevel, MemorySpace::local, {fragSize}, elementA);  // reg8
-    auto fragB = Rewriter::alloc_buffer(gridLevel, MemorySpace::local, {fragSize}, elementB);
+    auto tileB = Rewriter::alloc_buffer(blockLevel, MemorySpace::local, {ldgBSize}, elementB);
+    auto tileA = Rewriter::alloc_buffer(blockLevel, MemorySpace::local, {ldgASize}, elementA);
 
+    auto fragB = Rewriter::alloc_buffer(blockLevel, MemorySpace::local, {fragBSize}, elementB);
+    auto fragA = Rewriter::alloc_buffer(blockLevel, MemorySpace::local, {fragASize}, elementA);
+
+    auto smB = Rewriter::alloc_buffer(gridLevel, MemorySpace::shared, {batchMatmulConfig["BLOCK_SIZE_K"], batchMatmulConfig["BLOCK_SIZE_N"]}, elementB);
     auto smA = Rewriter::alloc_buffer(gridLevel, MemorySpace::shared, {batchMatmulConfig["BLOCK_SIZE_K"], batchMatmulConfig["BLOCK_SIZE_M"]}, elementA);
-    auto smB = Rewriter::alloc_buffer(gridLevel, MemorySpace::shared, {batchMatmulConfig["BLOCK_SIZE_K"], batchMatmulConfig["FOR_SIZE_N"]}, elementB);
-
-    llvm::SmallVector<mlir::Value> operandsA({blockElemIdx[batchNum], threadIdx[0], k_outer.getInductionVar()});
-    for (int i=0; i<batchNum; i++) { operandsA.insert(operandsA.begin(), blockIdx[i]); }
-    auto loadTileA = Rewriter::read(A, tileA, getAffineMap("one", builder, batchNum), operandsA, batchMatmulConfig["VECTORIZE_WIDTH"], k_outer, Position::begin);
-    llvm::SmallVector<mlir::Value> operandsB({k_outer.getInductionVar(), threadIdx[0], n_outer.getInductionVar()});
-    for (int i=0; i<batchNum; i++) { operandsB.insert(operandsB.begin(), blockIdx[i]); }
-    auto loadTileB = Rewriter::read(B, tileB, getAffineMap("two", builder, batchNum), operandsB, batchMatmulConfig["VECTORIZE_WIDTH"], loadTileA, Position::after);
+    DUMP(module);
+    
+    auto blockIdx = Rewriter::getParallelIdx(gridLevel);
+    auto threadIdx = Rewriter::getParallelIdx(blockLevel);
+    
+    auto loadTileAMap = getAffineMap("loadTileA", builder);
+    llvm::SmallVector<mlir::Value> operand1{blockIdx[0], threadIdx[0], threadIdx[1], blockIdx[1], k_outer.getInductionVar()};
+    auto loadTileA = Rewriter::read(A, tileA, loadTileAMap, operand1, vectorize_width, k_outer, Position::begin);
+    auto loadTileBMap = getAffineMap("loadTileB", builder);
+    llvm::SmallVector<mlir::Value> operand2{blockIdx[0], threadIdx[0], threadIdx[1], k_outer.getInductionVar(), blockIdx[2]};
+    auto loadTileB = Rewriter::read(B, tileB, loadTileBMap, operand2, vectorize_width, loadTileA, Position::after);
     DUMP(module);
 
-    auto storeTileA = Rewriter::write(tileA, smA, getAffineMap("three", builder), 
-                                      {threadIdx[0]}, batchMatmulConfig["VECTORIZE_WIDTH"], loadTileB, Position::after);
-    auto storeTileB = Rewriter::write(tileB, smB, getAffineMap("four", builder), 
-                                      {threadIdx[0]}, batchMatmulConfig["VECTORIZE_WIDTH"], storeTileA, Position::after);
+    auto storeTileAMap = getAffineMap("storeTileA", builder);
+    auto storeTileA = Rewriter::write(tileA, smA, storeTileAMap, {threadIdx[0], threadIdx[1]}, vectorize_width, loadTileB, Position::after);
+    auto storeTileBMap = getAffineMap("storeTileB", builder);
+    auto storeTileB = Rewriter::write(tileB, smB, storeTileBMap, {threadIdx[0], threadIdx[1]}, vectorize_width, storeTileA, Position::after);
     auto gpuBarrierPrefix = Rewriter::barrier(loadTileA, Position::before);
     auto gpuBarrierSuffix = Rewriter::barrier(storeTileB, Position::after);
+
     DUMP(module);
 
-    int64_t oneDimLen = sqrt(batchMatmulConfig["FOR_SIZE_N"]);
-    auto threadIdx_ =  Rewriter::blockLevelOneToTwo(blockLevel, oneDimLen);
-
-    auto loadFragA = Rewriter::read(smA, fragA, getAffineMap("five", builder),
-                                    {k_inner.getInductionVar(), threadIdx_[0]}, batchMatmulConfig["VECTORIZE_WIDTH"], k_inner, Position::begin);
-    auto loadFragB = Rewriter::read(smB, fragB, getAffineMap("six", builder), 
-                                    {k_inner.getInductionVar(), threadIdx_[1]}, batchMatmulConfig["VECTORIZE_WIDTH"], loadFragA, Position::after);
+    auto loadFragAMap = getAffineMap("loadFragA", builder);
+    auto loadFragA = Rewriter::read(smA, fragA, loadFragAMap, {threadIdx[0], threadIdx[1], k_inner.getInductionVar()}, vectorize_width, k_inner, Position::begin);
+    auto loadFragBMap = getAffineMap("loadFragB", builder);
+    auto loadFragB = Rewriter::read(smB, fragB, loadFragBMap, {threadIdx[0], threadIdx[1], k_inner.getInductionVar()}, vectorize_width, loadFragA, Position::after);
     DUMP(module);
 
-    Rewriter::cache_read(k_inner, A, fragA, getAffineMap("eight", builder), {m_inner.getInductionVar()});
-    Rewriter::cache_read(k_inner, B, fragB, getAffineMap("eight", builder), {n_inner.getInductionVar()});
+    Rewriter::cache_read(k_inner, A, fragA, getAffineMap("cacheReadA", builder), {m_inner.getInductionVar()});
+    Rewriter::cache_read(k_inner, B, fragB, getAffineMap("cacheReadB", builder), {n_inner.getInductionVar()});
     DUMP(module);
 
     auto writeCbody = Rewriter::get_write(blockLevel, C);
     assert(writeCbody.size() == 1);
-    auto m_inner_axes = Rewriter::split(writeCbody[0][0], 2, {batchMatmulConfig["VECTORIZE_WIDTH"]});
-    auto n_inner_axes = Rewriter::split(writeCbody[0][1], 2, {batchMatmulConfig["VECTORIZE_WIDTH"]});
+    auto m_inner_axes = Rewriter::split(writeCbody[0][0], 2, {vectorize_width});
+    auto n_inner_axes = Rewriter::split(writeCbody[0][1], 2, {vectorize_width});
     auto m_inner_0 = m_inner_axes[0], m_inner_1 = m_inner_axes[1];
     auto n_inner_0 = n_inner_axes[0], n_inner_1 = n_inner_axes[1];
     Rewriter::reorder({m_inner_0, n_inner_0, m_inner_1, n_inner_1});
-    m_inner_0 = Rewriter::modifyLoopStepToOne(m_inner_0);
-    n_inner_0 = Rewriter::modifyLoopStepToOne(n_inner_0);
     DUMP(module);
-    
-    llvm::SmallVector<mlir::Value> operandsC({blockElemIdx[batchNum], m_inner_0.getInductionVar(), threadIdx_[0], m_inner_1.getInductionVar(),
-                                              n_outer.getInductionVar(), threadIdx_[1], n_inner_0.getInductionVar(), n_inner_1.getInductionVar()});
-    for (int i=0; i<batchNum; i++) { operandsC.insert(operandsC.begin(), blockIdx[i]); }
-    Rewriter::cache_write(m_inner_0, C, C, getAffineMap("nine", builder, batchNum), operandsC);
-    Rewriter::vectorize(n_inner_1, batchMatmulConfig["VECTORIZE_WIDTH"]);
+
+    Rewriter::cache_write(m_inner_0, C, C, getAffineMap("cacheWriteC", builder), 
+                          {blockIdx[0], threadIdx[0], threadIdx[1], blockIdx[1], blockIdx[2], m_inner_0.getInductionVar(),
+                          n_inner_0.getInductionVar(), m_inner_1.getInductionVar(), n_inner_1.getInductionVar()});
+    DUMP(module);
+
+    Rewriter::vectorize(n_inner_1, vectorize_width);
     DUMP(module);
 
     auto doubleLoadTileB = Rewriter::pipeline({loadTileB, storeTileB}, smB, k_outer);
@@ -3136,7 +3425,7 @@ void BatchMatmulOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder
       auto ub = forOp.getConstantUpperBound();
       auto lb = forOp.getConstantLowerBound();
       auto times = (ub - lb) / step;
-      if (times >= std::min<int64_t>(threshold, batchMatmulConfig["VECTORIZE_WIDTH"])) return false;
+      if (times >= std::min<int64_t>(threshold, vectorize_width)) return false;
       return true;
     });
     DUMP(module);
@@ -3154,5 +3443,4 @@ void BatchMatmulOptimizer::applyOptimzer(mlir::ModuleOp& module, mlir::OpBuilder
     DUMP(module);
   }
 }
-
 }

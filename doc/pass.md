@@ -735,7 +735,49 @@ __global__ void kernel0(float* arg0, float* arg1, float* arg2, float* arg3) {
   }
 }
 
-
+func.func @LayerNorm_2_768_768_axis_1(%arg0: memref<2x768x768xf32, 1>, %arg1: memref<768x768xf32, 1>, %arg2: memref<768x768xf32, 1>) -> memref<2x768x768xf32, 1> attributes {func.state = "cpu"} {
+    %4 = memref.alloc() : memref<2x768x768xf32, 1>
+    affine.for %arg3 = 0 to 2 {
+      %cst = arith.constant 5.898240e+05 : f32
+      %cst_0 = arith.constant 9.99999974E-6 : f32
+      %cst_1 = arith.constant 0.000000e+00 : f32
+      %5 = affine.for %arg4 = 0 to 768 iter_args(%arg5 = %cst_1) -> (f32) {
+        %11 = affine.for %arg6 = 0 to 768 iter_args(%arg7 = %arg5) -> (f32) {
+          %12 = affine.load %arg0[%arg3, %arg4, %arg6] : memref<2x768x768xf32, 1>
+          %13 = arith.addf %12, %arg7 : f32
+          affine.yield %13 : f32
+        }
+        affine.yield %11 : f32
+      }
+      %6 = arith.divf %5, %cst : f32
+      %7 = affine.for %arg4 = 0 to 768 iter_args(%arg5 = %cst_1) -> (f32) {
+        %11 = affine.for %arg6 = 0 to 768 iter_args(%arg7 = %arg5) -> (f32) {
+          %12 = affine.load %arg0[%arg3, %arg4, %arg6] : memref<2x768x768xf32, 1>
+          %13 = arith.subf %12, %6 : f32
+          affine.store %13, %4[%arg3, %arg4, %arg6] : memref<2x768x768xf32, 1>
+          %14 = arith.mulf %13, %13 : f32
+          %15 = arith.addf %14, %arg7 : f32
+          affine.yield %15 : f32
+        }
+        affine.yield %11 : f32
+      }
+      %8 = arith.divf %7, %cst : f32
+      %9 = arith.addf %8, %cst_0 : f32
+      %10 = math.sqrt %9 : f32
+      affine.for %arg4 = 0 to 768 {
+        affine.for %arg5 = 0 to 768 {
+          %11 = affine.load %4[%arg3, %arg4, %arg5] : memref<2x768x768xf32, 1>
+          %12 = affine.load %arg1[%arg4, %arg5] : memref<768x768xf32, 1>
+          %13 = affine.load %arg2[%arg4, %arg5] : memref<768x768xf32, 1>
+          %14 = arith.divf %11, %10 : f32
+          %15 = arith.mulf %12, %14 : f32
+          %16 = arith.addf %15, %13 : f32
+          affine.store %16, %4[%arg3, %arg4, %arg5] : memref<2x768x768xf32, 1>
+        }
+      }
+    }
+    return %4 : memref<2x768x768xf32, 1>
+  }
 
   
 1.onnx 参数做参考
@@ -773,18 +815,15 @@ __global__ void kernel0(float* arg0, float* arg1, float* arg2, float* arg3) {
           mean和invStdDev：
             需要在buidler时传入一个flag，判断cuda kernel 的mean和invStdDev参数是否起作用
             注：若mean和invStdDev参数不起作用，那么将不会生成与其有关的ir，从而returnop就不能被构建，因为returnop需要mean和invStdDev的memref
-    
 
 
 
 
 
 
-
-
-
-
-
-
-
+1. 修改算子在应用时遇到的问题
+2. layerNorm算子axis参数，支持任意维度进行layerNorm操作
+3. 完成了对batch matmul operator mlir部分的代码
+4. 测试了batch matmul与cublas的性能对比
+5. 修改了CUDACodeGen，保证了生成kernel的参数列表顺序符合常规顺序
 ```

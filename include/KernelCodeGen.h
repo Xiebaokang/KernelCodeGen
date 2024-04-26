@@ -53,7 +53,8 @@ public:
        {"BrTileS", 8}, {"BcTileS", 8}, {"BrTileO", 8}, {"HdTileO", 8}, {"Width", 4}, {"WARP_SIZE", 32}}
     };
     batchMatmulConfigs = {
-      {{"BLOCK_SIZE_M", 128}, {"FOR_SIZE_N", 64}, {"BLOCK_SIZE_K", 8}, {"THREAD_SIZE", 8}, {"Slice", 8}, {"VECTORIZE_WIDTH", 4}}
+      { {"BLOCK_SIZE_M", 128}, {"BLOCK_SIZE_N", 128}, {"BLOCK_SIZE_K", 8}, {"THREAD_SIZE_M", 8}, {"THREAD_SIZE_N", 8}, 
+      {"VECTORIZE_WIDTH", 4}, {"WARP_SIZE", 32}}
     };
   }
   KernelCodeGenerator() = delete;
